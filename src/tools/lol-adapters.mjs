@@ -23,6 +23,24 @@ async function gw(path, params = {}) {
   }
 }
 
+
+const SH_OFFSET = 8 * 3600e3;
+
+function normDay(input) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(input || ''))) return String(input);
+  const kw = String(input || 'today').toLowerCase();
+  const d = new Date(Date.now() + SH_OFFSET);
+  if (kw === 'yesterday') d.setUTCDate(d.getUTCDate() - 1);
+  else if (kw === 'tomorrow') d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+const shText = (iso) => {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return iso;
+  return new Date(t + SH_OFFSET).toISOString().slice(0, 16).replace('T', ' ');
+};
+
 const cut = (s, n = 60) => String(s || '').slice(0, n);
 
 function vodUrl(provider, param) {
@@ -72,6 +90,65 @@ export default function registerLolAdapters(register, client) {
           block: e.blockName || '',
         }));
       return { count: rows.length, events: rows };
+    },
+  });
+
+
+  register('lol_matches_by_date', {
+    domain: 'lol',
+    description:
+      '按日期查 LoL 比赛（含赛果比分）。问“今天/明天有没有比赛”“前几天的赛果”“昨天谁赢了”都用这个，不要用 get-live-matches。',
+    schema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: "today / yesterday / tomorrow 或 YYYY-MM-DD，默认 today" },
+        days: { type: 'number', description: '从 date 起向后覆盖几天，1-7，默认 1' },
+        state: { type: 'string', enum: ['all', 'completed', 'upcoming'] },
+      },
+    },
+    ttlMs: 120_000,
+    call: async ({ date = 'today', days = 1, state = 'all' }) => {
+      const day = normDay(date);
+      const span = Math.min(Math.max(Number(days) || 1, 1), 7);
+      const start = Date.parse(`${day}T00:00:00+08:00`);
+      const end = start + span * 86400e3;
+
+      const j = await gw('getSchedule', { hl: 'zh-CN' });
+      const events = j?.data?.schedule?.events || [];
+      const rows = events
+        .filter((e) => e?.match?.id)
+        .filter((e) => {
+          const t = Date.parse(e.startTime);
+          return t >= start && t < end;
+        })
+        .filter((e) => (state === 'all' ? true : e.state === state))
+        .map((e) => {
+          const teams = (e.match.teams || []).map((x) => ({
+            name: x.name,
+            score: x.result?.gameWins ?? null,
+            outcome: x.result?.outcome ?? null,
+          }));
+          const winner = teams.find((x) => x.outcome === 'win')?.name || null;
+          return {
+            event_id: e.match.id,
+            teams,
+            winner,
+            state: e.state,
+            start_time: shText(e.startTime),
+            league: e.league?.name || '',
+            block: e.blockName || '',
+            has_vod: (e.match.flags || []).includes('hasVod'),
+          };
+        })
+        .sort((a, b) => a.start_time.localeCompare(b.start_time));
+
+      return {
+        date: day,
+        days: span,
+        count: rows.length,
+        matches: rows.slice(0, 12),
+        note: rows.length ? undefined : '这个时间段没有查到比赛，直接告诉用户没有，不要编。',
+      };
     },
   });
 

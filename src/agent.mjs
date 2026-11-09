@@ -247,8 +247,11 @@ const DOMAIN_PROTOCOL = {
   lol: `
 【LoL 赛事专用】
 - 工具返回是纯文本（markdown），不是 JSON，不要尝试解析结构。
-- 时间按返回的原文说，换算时区就说明是北京时间。
-- 没直播就说"现在没直播"，这是正常结果不是错误。`,
+- 问「今天/明天有没有比赛」「前几天赛果」「昨天谁赢了」→ 必须用 lol_matches_by_date，不要用 get-live-matches。
+- get-live-matches / get-live-match-score 只回答「现在正在打什么」，不能用来回答「今天有没有比赛」。
+- 查某场比分详情或 VOD → 先 lol_resolve_event 拿 event_id，再 lol_event_details / lol_event_vods。
+- 这个时间段没有比赛就直接说「今天没有比赛」，不要用「没直播」敷衍，也不许编赛果。
+- 时间统一说北京时间（UTC+8）。`,
   hltv: `
 【HLTV 专用】
 - Rating 保留工具给的原值，不要四舍五入成"很高"。

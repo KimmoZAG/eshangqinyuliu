@@ -8,6 +8,7 @@ import { sendLines } from './outbox.mjs';
 import { startJobs, noteGroup, runTopic, ensure } from './jobs.mjs';
 import { startMcpServers, listTools } from './tools.mjs';
 import { ALIASES } from '../persona.mjs';
+import { loadAliases } from './bindings.mjs';
 
 const BOT_NAME = process.env.BOT_NAME || '金桦';
 const REPLY_WINDOW = num('REPLY_WINDOW_MS', 4.5 * 60 * 1000);
@@ -268,7 +269,19 @@ async function onNotice(evt) {
 
 /* ---------------- 启动 ---------------- */
 
+/** 合并 CLI 写入的绑定表（机器人只读，避免和 CLI 抢写 profiles.json） */
+function applyAliases() {
+  const aliases = loadAliases();
+  for (const [openid, v] of Object.entries(aliases)) {
+    if (!v?.name) continue;
+    const p = memory.profile(openid);
+    if (p.name !== v.name || !p.bound) memory.setAlias(openid, v.name);
+  }
+}
+
 async function main() {
+  applyAliases();
+  setInterval(applyAliases, 60_000);
   const boot = await startMcpServers();
   const tools = boot.tools;
   const opgg = listTools().filter((t) => t.name.startsWith('opgg_')).length;

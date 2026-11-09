@@ -4,6 +4,7 @@ import { DIRS, readJson, writeJson, log } from './core.mjs';
 import * as memory from './memory.mjs';
 
 const FILE = path.join(DIRS.data, 'bind-codes.json');
+const ALIAS_FILE = path.join(DIRS.data, 'aliases.json');
 
 // 去掉容易看错的 0/O/1/I
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -24,6 +25,19 @@ function genCode(prefix, len = 5) {
     .replace(/[^A-Z]/g, '')
     .slice(0, 3);
   return p ? `${p}-${s}` : s;
+}
+
+/* ---------------- 绑定结果（机器人只读，CLI 写） ---------------- */
+
+export function loadAliases() {
+  return readJson(ALIAS_FILE, {});
+}
+
+export function saveAlias(openid, name) {
+  const a = loadAliases();
+  a[openid] = { name, at: new Date().toISOString() };
+  writeJson(ALIAS_FILE, a);
+  return a[openid];
 }
 
 /** 管理员侧：为某个人生成一次性绑定码 */
@@ -69,7 +83,7 @@ export function redeem(code, openid) {
   item.usedBy = openid;
   save(db);
 
-  memory.setAlias(openid, item.name);
+  saveAlias(openid, item.name);
   log('bind', `${openid.slice(0, 8)} -> ${item.name}（口令绑定）`);
   return { ok: true, name: item.name };
 }
@@ -92,9 +106,14 @@ export function revoke(code) {
 
 /** 当前已认出来的人（openid 是平台 id，无法反查 QQ 号） */
 export function boundPeople() {
-  return Object.entries(memory.profileTable())
-    .filter(([, p]) => p.bound && p.name)
-    .map(([openid, p]) => ({ openid, name: p.name }));
+  const out = new Map();
+  for (const [openid, p] of Object.entries(memory.profileTable())) {
+    if (p.bound && p.name) out.set(openid, p.name);
+  }
+  for (const [openid, v] of Object.entries(loadAliases())) {
+    if (v?.name) out.set(openid, v.name);
+  }
+  return [...out.entries()].map(([openid, name]) => ({ openid, name }));
 }
 
 
@@ -146,12 +165,13 @@ function* allRecords() {
 /** 还没绑定的发言人，按最近发言排序，带第一句话方便认人 */
 export function unknownSpeakers({ limit = 20 } = {}) {
   const bound = memory.profileTable();
+  const aliases = loadAliases();
   const map = new Map();
 
   for (const r of allRecords()) {
     const uid = r.u;
     if (!uid || r.self) continue;
-    if (bound[uid]?.bound) continue;
+    if (bound[uid]?.bound || aliases[uid]) continue;
 
     const text = String(r.c || '').trim();
     const cur = map.get(uid);

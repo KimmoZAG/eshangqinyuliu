@@ -8,7 +8,7 @@
  *   node --env-file=.env bind.mjs revoke ZRC-ABCDE
  *   node --env-file=.env bind.mjs who                     # 已认出的人
  */
-import { createCode, listCodes, revoke, boundPeople, unknownSpeakers } from './src/bindings.mjs';
+import { createCode, listCodes, revoke, boundPeople, unknownSpeakers, saveAlias } from './src/bindings.mjs';
 import * as memory from './src/memory.mjs';
 import { ALIASES } from './persona.mjs';
 
@@ -52,12 +52,18 @@ switch (cmd) {
       break;
     }
     const hits = Object.keys(memory.profileTable()).filter((id) => id.startsWith(prefix));
+    if (hits.length === 0 && prefix.length >= 8) {
+      // 允许直接给完整 openid（比如从旧库里捞出来的，profiles 里还没记录）
+      saveAlias(prefix, name);
+      console.log(`已写入绑定表 ${prefix} -> ${name}（未在历史里出现过，按完整 openid 记录）`);
+      break;
+    }
     if (hits.length !== 1) {
       console.log(hits.length ? `前缀不唯一，命中 ${hits.length} 个：\n${hits.join('\n')}` : '没这个 openid');
       break;
     }
-    memory.setAlias(hits[0], name);
-    console.log(`已绑定 ${hits[0]} -> ${name}`);
+    saveAlias(hits[0], name);
+    console.log(`已写入绑定表 ${hits[0]} -> ${name}（机器人 60 秒内自动生效）`);
     break;
   }
   case 'unknown': {

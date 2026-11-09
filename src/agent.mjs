@@ -151,6 +151,11 @@ export function similarity(a, b) {
 
 export async function composeReply({ key, speaker, uid, text, imageUrl, imageHint, limit = num('MAX_BURST', 5) }) {
   // 需要外部数据的问题先走工具通道（OP.GG 等），拿不到再回落普通应答
+  // 超长输入直接短路：又慢又容易把上下文冲爆
+  if (String(text || '').length > 800) {
+    return ['这么长 我眼睛疼 说重点'];
+  }
+
   const cfg = groupConfig(key);
   const domain = await pickDomain(text);
   if (cfg.features.search && domain) {

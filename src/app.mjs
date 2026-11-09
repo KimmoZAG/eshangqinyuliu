@@ -1,5 +1,5 @@
 import { log, groupConfig, trace, metric, num } from './core.mjs';
-import { startTransport, stripAt, botOpenid, groupState, forgetGroup } from './transport.mjs';
+import { startTransport, stripAt, botOpenid, botNames, groupState, forgetGroup } from './transport.mjs';
 import * as pipeline from './pipeline.mjs';
 import * as memory from './memory.mjs';
 import * as agent from './agent.mjs';
@@ -48,8 +48,19 @@ async function onGroupMessage(evt) {
   const uid = author.member_openid || author.id;
   const raw = (d.content || '').trim();
   const selfId = await botOpenid(group);
-  const isAt = evt.at === true || (!!selfId && raw.includes(`<@${selfId}>`));
-  const text = stripAt(raw);
+  const names = botNames();
+
+  // 真提及（<@openid>）或手打的「@金桦」「@金桦（黄石版）」都算 @
+  const byTag = !!selfId && raw.includes(`<@${selfId}>`);
+  const byText = names.some((n) => raw.startsWith(`@${n}`) || raw.includes(`@${n}`));
+  const isAt = evt.at === true || byTag || byText;
+
+  let text = stripAt(raw);
+  if (isAt) {
+    for (const n of names) {
+      text = text.replace(new RegExp(`^@?${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s,，:：]*`), '').trim();
+    }
+  }
   const cfg = groupConfig(group);
   const speaker = memory.nameOf(uid, author.username);
 

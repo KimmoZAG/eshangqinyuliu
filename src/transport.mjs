@@ -13,6 +13,7 @@ let attempt = 0;
 let handler = null;
 
 const botIds = new Map(); // group -> 机器人自己的 member_openid
+let botUser = null; // READY 下发的机器人信息
 
 /* ---------------- 事件归一化：message / notice / request / meta ---------------- */
 
@@ -72,6 +73,10 @@ export async function botOpenid(group) {
   const id = r?.data?.member_openid;
   if (id) botIds.set(group, id);
   return id;
+}
+
+export function botNames() {
+  return [botUser?.username, process.env.BOT_NAME].filter(Boolean);
 }
 
 export function forgetGroup(group) {
@@ -160,6 +165,7 @@ async function connect() {
     if (p.t === 'READY') {
       sessionId = p.d.session_id;
       canResume = true;
+      botUser = p.d.user || null;
       metric('ws_ready');
     }
 

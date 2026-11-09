@@ -68,6 +68,47 @@ async function fetchImage(url) {
   }
 }
 
+
+/* ---------------- 工具协议防泄漏 ---------------- */
+
+/** 从模型输出里提取 JSON：支持裸 JSON、```json 代码块、<tool_call> 标签包裹 */
+export function extractJson(text) {
+  const raw = String(text || '').trim();
+  const direct = raw.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  try {
+    return JSON.parse(direct);
+  } catch {
+    // 在文本里找第一个配对的 {...}
+    const start = direct.indexOf('{');
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = start; i < direct.length; i += 1) {
+      if (direct[i] === '{') depth += 1;
+      else if (direct[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            return JSON.parse(direct.slice(start, i + 1));
+          } catch {
+            return null;
+          }
+        }
+      }
+    }
+    return null;
+  }
+}
+
+const LEAK = /<tool_call|<\/tool_call>|"tool"\s*:|^\s*\{\s*"(tool|final|args)"/i;
+
+/** 出站最后一道闸：任何像工具协议/JSON 的行都不许发给群 */
+export function sanitizeLines(lines) {
+  return (lines || [])
+    .map((l) => String(l).replace(/<\/?tool_call>/gi, '').trim())
+    .filter((l) => l && !LEAK.test(l) && !/^[{[]/.test(l))
+    .slice(0, 5);
+}
+
 /* ---------------- 快通道：应答 ---------------- */
 
 export async function composeReply({ key, speaker, uid, text, imageUrl, imageHint, limit = num('MAX_BURST', 5) }) {
@@ -88,7 +129,7 @@ export async function composeReply({ key, speaker, uid, text, imageUrl, imageHin
   const ctx = memory.buildContext(key, { query: text, memberIds: [uid, person?.id].filter(Boolean) });
 
   const angleHint = angle ? `\n如果要锐评${person.name}，这次用「${angle}」这个角度，别用别的。` : '';
-  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(limit, 3)} 行，每行一条。${angleHint}`;
+  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(limit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}`;
 
   const messages = [{ role: 'system', content: systemPrompt() }];
   const img = imageUrl ? await fetchImage(imageUrl) : null;
@@ -120,7 +161,7 @@ export async function composeReply({ key, speaker, uid, text, imageUrl, imageHin
     }
   }
 
-  let lines = splitReplies(out, limit);
+  let lines = sanitizeLines(splitReplies(out, limit));
   if (!lines.length) lines = ['我刚卡了一下，你再说一遍'];
 
   if (person && angle) memory.markAngle(person.id, angle);
@@ -287,19 +328,25 @@ export async function planAndCompose({ key, speaker, uid, text, domain }) {
       return null;
     }
 
-    let plan;
-    const cleaned = out.replace(/```json|```/g, '').trim();
-    try {
-      plan = JSON.parse(cleaned);
-    } catch {
-      // 模型偶尔不按协议、直接说人话：当成 final 用，别把整条回复丢掉
-      if (cleaned && !cleaned.startsWith('{')) return splitReplies(cleaned, 5);
+    const plan = extractJson(out);
+    if (!plan || (!plan.tool && !plan.final)) {
+      // 模型没按协议输出（常见：<tool_call> 标签）。提醒一次，仍不行就放弃，
+      // 绝不把协议文本当回答发出去。
+      trace({ kind: 'plan_bad_format', key, sample: String(out).slice(0, 120) });
+      if (i === 0) {
+        messages.push({ role: 'assistant', content: String(out).slice(0, 200) });
+        messages.push({
+          role: 'user',
+          content: '格式错了。只输出一行 JSON，例如 {"tool":"lol_recent_results","args":{"limit":6}} 或 {"final":"..."}。不要用 <tool_call> 标签，不要解释。',
+        });
+        continue;
+      }
       return null;
     }
 
     if (plan.final) {
       trace({ kind: 'plan_final', key, steps: i });
-      return splitReplies(plan.final, 5);
+      return sanitizeLines(splitReplies(plan.final, 5));
     }
     if (!plan.tool) return null;
 
@@ -390,7 +437,7 @@ export async function buildTopic({ group, cfg }) {
     maxTokens: 300,
   }).catch(() => '');
 
-  const lines = splitReplies(out, 2);
+  const lines = sanitizeLines(splitReplies(out, 2));
   if (!lines.length) return [];
   return lines;
 }

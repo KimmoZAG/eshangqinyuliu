@@ -247,7 +247,9 @@ const DOMAIN_PROTOCOL = {
   lol: `
 【LoL 赛事专用】
 - 工具返回是纯文本（markdown），不是 JSON，不要尝试解析结构。
-- 问「今天/明天有没有比赛」「前几天赛果」「昨天谁赢了」→ 必须用 lol_matches_by_date，不要用 get-live-matches。
+- 问「今天/明天有没有比赛」「昨天谁赢了」（有明确日期）→ 用 lol_matches_by_date。
+- 问「前几天赛果」「最近谁赢了」「最近有什么比赛」（没给具体日期）→ 必须用 lol_recent_results，不要自己猜日期。
+- 任何情况下都不要用 get-live-matches 回答「有没有比赛」。
 - get-live-matches / get-live-match-score 只回答「现在正在打什么」，不能用来回答「今天有没有比赛」。
 - 查某场比分详情或 VOD → 先 lol_resolve_event 拿 event_id，再 lol_event_details / lol_event_vods。
 - 这个时间段没有比赛就直接说「今天没有比赛」，不要用「没直播」敷衍，也不许编赛果。
@@ -302,7 +304,16 @@ export async function planAndCompose({ key, speaker, uid, text, domain }) {
     if (!plan.tool) return null;
 
     const r = await callTool(plan.tool, plan.args);
-    trace({ kind: 'tool_call', key, tool: plan.tool, ok: r.ok });
+    trace({
+      kind: 'tool_call',
+      key,
+      tool: plan.tool,
+      args: plan.args,
+      ok: r.ok,
+      code: r.code,
+      brief: JSON.stringify(r.result ?? r.error).slice(0, 300),
+    });
+    log('agent', `tool ${plan.tool} ${JSON.stringify(plan.args)} ok=${r.ok}`);
     messages.push({ role: 'assistant', content: out });
     messages.push({
       role: 'user',

@@ -9,9 +9,9 @@
 const BASE = process.env.LOL_API_BASE_URL || 'https://esports-api.lolesports.com';
 const KEY = process.env.LOL_API_KEY || '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z';
 
-async function gw(path, params = {}) {
-  const url = new URL(`${BASE}/persisted/gw/${path}`);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+const scheduleCache = new Map(); // path+params -> {at, data}
+
+async function gwOnce(url) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15_000);
   try {
@@ -21,6 +21,28 @@ async function gw(path, params = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function gw(path, params = {}) {
+  const url = new URL(`${BASE}/persisted/gw/${path}`);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  const key = url.toString();
+
+  const hit = scheduleCache.get(key);
+  if (hit && Date.now() - hit.at < 60_000) return hit.data;
+
+  let last;
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      const data = await gwOnce(url);
+      scheduleCache.set(key, { at: Date.now(), data });
+      return data;
+    } catch (e) {
+      last = e;
+      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+    }
+  }
+  throw last;
 }
 
 
@@ -149,6 +171,51 @@ export default function registerLolAdapters(register, client) {
         matches: rows.slice(0, 12),
         note: rows.length ? undefined : '这个时间段没有查到比赛，直接告诉用户没有，不要编。',
       };
+    },
+  });
+
+
+  register('lol_recent_results', {
+    domain: 'lol',
+    description:
+      '直接返回最近几场已结束比赛的赛果（队名+比分+胜者+时间），不需要日期参数。问“前几天赛果/最近谁赢了/最近有什么比赛”一律先用这个。',
+    schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: '返回几场，默认 6' },
+        team: { type: 'string', description: '可选，只看某队，如 BLG / T1' },
+      },
+    },
+    ttlMs: 120_000,
+    call: async ({ limit = 6, team = '' } = {}) => {
+      const j = await gw('getSchedule', { hl: 'zh-CN' });
+      const events = j?.data?.schedule?.events || [];
+      const t = String(team || '').toLowerCase();
+      const rows = events
+        .filter((e) => e?.match?.id)
+        .filter((e) => e.state === 'completed' || (e.match.teams || []).some((x) => x.result?.outcome))
+        .filter((e) => {
+          if (!t) return true;
+          return (e.match.teams || []).some((x) => `${x.name || ''} ${x.code || ''}`.toLowerCase().includes(t));
+        })
+        .sort((a, b) => Date.parse(b.startTime) - Date.parse(a.startTime))
+        .slice(0, Math.min(Math.max(Number(limit) || 6, 1), 10))
+        .map((e) => {
+          const teams = (e.match.teams || []).map((x) => ({
+            name: x.name,
+            score: x.result?.gameWins ?? null,
+            outcome: x.result?.outcome ?? null,
+          }));
+          return {
+            event_id: e.match.id,
+            teams,
+            winner: teams.find((x) => x.outcome === 'win')?.name || null,
+            start_time: shText(e.startTime),
+            league: e.league?.name || '',
+            block: e.blockName || '',
+          };
+        });
+      return { count: rows.length, matches: rows, note: rows.length ? undefined : '赛程源里没有已结束的比赛，直接说没查到。' };
     },
   });
 

@@ -1,5 +1,6 @@
 import { groupConfig, patchGroupConfig, log } from './core.mjs';
 import * as memory from './memory.mjs';
+import { redeem } from './bindings.mjs';
 import { getSession, setSession, clearSession } from './pipeline.mjs';
 
 const cooldown = new Map(); // `${plugin}:${uid}` -> ts
@@ -27,8 +28,19 @@ export function commandOf(text) {
 define('help', {
   aliases: ['帮助', '菜单'],
   handler: () => ({
-    lines: ['能用的：/战绩 人、/开黑报名、/话题（管理）、/闭嘴 和 /说话（管理）'],
+    lines: ['能用的：绑定 码、/战绩 人、/开黑报名、/话题（管理）、/闭嘴 和 /说话（管理）'],
   }),
+});
+
+define('绑定', {
+  aliases: ['bind', '认证'],
+  handler: ({ uid, arg }) => {
+    if (!arg) return { lines: ['码呢 管理给你那个码 发我'] };
+    const r = redeem(arg, uid);
+    if (!r.ok) return { lines: [r.reason] };
+    if (r.repeat) return { lines: [`你早就是${r.name}了`] };
+    return { lines: [`行 ${r.name} 记下了 以后别装别人`] };
+  },
 });
 
 define('战绩', {

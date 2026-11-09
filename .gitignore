@@ -1,0 +1,12 @@
+# 密钥与配置
+.env
+.env.local
+
+# 运行时数据（含群消息、画像、trace）
+data/
+logs/
+
+# 依赖与临时文件
+node_modules/
+*.log
+.DS_Store

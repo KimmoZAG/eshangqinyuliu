@@ -2,7 +2,7 @@ import { log, nowText, trace, metric, num, groupConfig } from './core.mjs';
 import { chat, splitReplies } from '../llm.mjs';
 import { buildSystemPrompt, ALIASES } from '../persona.mjs';
 import * as memory from './memory.mjs';
-import { listTools, callTool } from './tools.mjs';
+import { listTools, callTool, toolsByDomain } from './tools.mjs';
 
 const BOT_NAME = process.env.BOT_NAME || '金桦';
 
@@ -73,8 +73,10 @@ async function fetchImage(url) {
 export async function composeReply({ key, speaker, uid, text, imageUrl, imageHint, limit = num('MAX_BURST', 5) }) {
   // 需要外部数据的问题先走工具通道（OP.GG 等），拿不到再回落普通应答
   const cfg = groupConfig(key);
-  if (wantsTools(text, cfg)) {
-    const viaTool = await planAndCompose({ key, speaker, uid, text });
+  const domain = pickDomain(text);
+  if (cfg.features.search && domain) {
+    trace({ kind: 'domain_route', key, domain });
+    const viaTool = await planAndCompose({ key, speaker, uid, text, domain });
     if (viaTool?.length) {
       metric('reply_via_tool');
       return viaTool;
@@ -150,35 +152,83 @@ export async function decideInterject({ key, uid, speaker, text, cfg }) {
 
 /* ---------------- 慢通道：工具循环 ---------------- */
 
-const TOOL_HINT = /查|搜|最新|版本|更新|赛程|比赛|胜率|攻略|出装|新闻|改版|公告|职业|选手|韩服|梯队|对线|强度|克制|排行|榜单/;
+const DOMAIN_HINTS = {
+  steam: /steam|游戏|多少钱|价格|打折|折扣|好评|评价|在线人数|销量|发售|新游|dlc|单机|库里/i,
+  lol: /赛程|赛果|比赛|战队|联赛|lpl|lck|世界赛|msi|vod|录像|比分|决赛|小组赛|直播/i,
+  hltv: /hltv|cs2|csgo|反恐|major|rating|世界排名|选手|教练|阵容|hltv/i,
+  opgg: /韩服|胜率|出场率|ban率|出装|符文|对线|克制|梯队|英雄|职业选手|rank|kda/i,
+};
 
-export function wantsTools(text, cfg) {
-  return !!cfg.features.search && TOOL_HINT.test(text);
+/** 先选域，再按需注入该域工具与 schema（64 个工具不全量暴露） */
+export function pickDomain(text) {
+  const s = String(text || '');
+  const scored = [];
+  for (const [domain, re] of Object.entries(DOMAIN_HINTS)) {
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+    const hits = (s.match(g) || []).length;
+    if (hits) scored.push({ domain, hits });
+  }
+  if (!scored.length) return null;
+  scored.sort((a, b) => b.hits - a.hits);
+  return scored[0].domain;
 }
 
-const PROTOCOL = `
+export function wantsTools(text, cfg) {
+  return !!cfg.features.search && !!pickDomain(text);
+}
+
+const BASE_PROTOCOL = `
 
 【工具协议】你可以调用工具。需要工具时只输出：{"tool":"工具名","args":{...}}
 不需要工具、可以直接回答时输出：{"final":"直接给你的回答"}
-不要输出其他任何内容。工具最多用 3 次。
+不要输出其他任何内容。工具最多用 3 次。参数必须符合给定 schema，不许自己编字段名。
 
 【数据规则】
-1. 区域固定韩服，不要问用户"哪个区"。
-2. 英雄名传英文大写（AHRI、ZED、MISSFORTUNE），用户说中文你负责翻译，不要往参数里塞中文。
-3. 只报工具返回里有的数字，一个都不许编、不许换算、不许写"大概"。
-4. 返回的胜率/登场率已经是百分数（51 就是 51%），不要再乘 100。
-5. 工具返回 ok:false 或说查不到，就直接回"没查到"，不要用你的常识补。
-6. 问"韩服前100都是谁""天梯总榜"这类问题，直接说没有这个数据源，别硬答。
-7. 判断职业选手只看 is_pro 字段，为 false 就说没有职业标记，不许凭段位或 ID 猜。
-8. 问到具体英雄/选手/梯队时，必须先调工具拿到数据，再输出 final。不许说"我给你查查""我去看看"然后直接结束。`;
+1. 只报工具返回里真实存在的数字和名称，一个都不许编、不许换算、不许写"大概"。
+2. 工具返回错误或查不到，就直接说没查到，不许用你的常识补。
+3. 不许说"我给你查查"然后不调工具就结束；要数据就必须先调工具。
+4. 这是群聊，回答短，最多 3 行。`;
 
-export async function planAndCompose({ key, speaker, uid, text }) {
-  const tools = listTools().filter((t) => !['recall_memory', 'member_profile'].includes(t.name));
+const DOMAIN_PROTOCOL = {
+  opgg: `
+【OP.GG 专用】
+- 区域固定韩服，不要问"哪个区"。
+- 英雄名传英文大写（AHRI / ZED / MISSFORTUNE），中文你负责翻译。
+- 胜率/登场率已是百分数（51 就是 51%），不要再乘 100。
+- 判断职业选手只看 is_pro，不许凭段位或 ID 猜。`,
+  steam: `
+【Steam 专用】
+- 涉及具体游戏先用 steam_searchApps 找 appid，再用 appid 查详情/价格/在线人数。
+- 价格照抄返回的币种和数字，不许换算成人民币，不许说"约"。
+- 评价只用 review summary 里的数值；拿不到就说拿不到。
+- player_count 是在线人数，不是销量，不许混。`,
+  lol: `
+【LoL 赛事专用】
+- 工具返回是纯文本（markdown），不是 JSON，不要尝试解析结构。
+- 时间按返回的原文说，换算时区就说明是北京时间。
+- 没直播就说"现在没直播"，这是正常结果不是错误。`,
+  hltv: `
+【HLTV 专用】
+- Rating 保留工具给的原值，不要四舍五入成"很高"。
+- 世界排名、积分照抄数字。
+- 逐地图数据可能为空数组，空就直接说没解析到，不要重试超过 1 次。`,
+};
+
+export async function planAndCompose({ key, speaker, uid, text, domain }) {
+  const tools = toolsByDomain(domain).filter((t) => !['recall_memory', 'member_profile'].includes(t.name));
   if (!tools.length) return null;
 
+  const catalog = tools.map((t) => ({ name: t.name, description: t.description, schema: t.schema }));
   const ctx = memory.buildContext(key, { query: text, memberIds: [uid] });
   const messages = [
-    { role: 'system', content: systemPrompt() + PROTOCOL + `\n可用工具：${tools.map((t) => `${t.name}（${t.description}）`).join('；')}` },
+    {
+      role: 'system',
+      content:
+        systemPrompt() +
+        BASE_PROTOCOL +
+        (DOMAIN_PROTOCOL[domain] || '') +
+        `\n可用工具（JSON）：${JSON.stringify(catalog)}`,
+    },
     { role: 'user', content: `${ctx}\n\n「${speaker}」问：「${text}」` },
   ];
 

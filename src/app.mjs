@@ -6,7 +6,7 @@ import * as agent from './agent.mjs';
 import { runPlugin, runSession, commandOf, pluginList } from './plugins.mjs';
 import { sendLines } from './outbox.mjs';
 import { startJobs, noteGroup, runTopic, ensure } from './jobs.mjs';
-import { startMcp, listTools } from './tools.mjs';
+import { startMcpServers, listTools } from './tools.mjs';
 import { ALIASES } from '../persona.mjs';
 
 const BOT_NAME = process.env.BOT_NAME || '金桦';
@@ -248,7 +248,8 @@ async function onNotice(evt) {
 /* ---------------- 启动 ---------------- */
 
 async function main() {
-  const tools = await startMcp();
+  const boot = await startMcpServers();
+  const tools = boot.tools;
   const opgg = listTools().filter((t) => t.name.startsWith('opgg_')).length;
   log('app', `${BOT_NAME} 启动 | stdio MCP ${tools} 个 | OP.GG ${opgg} 个 | 插件 ${pluginList().length} 个`);
   log('app', `策略：回复≤${num('MAX_BURST', 5)}条 | 插话P=${num('INTERJECT_P', 0.35)} | 周期${num('TOPIC_CYCLE_H', 6)}h`);

@@ -1,0 +1,90 @@
+[
+  {
+    "name": "steam",
+    "domain": "steam",
+    "enabled": true,
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@tmhs/steam-mcp"
+    ],
+    "env": {
+      "NODE_OPTIONS": "--dns-result-order=ipv4first"
+    },
+    "initTimeoutMs": 90000,
+    "listTimeoutMs": 30000,
+    "toolTimeoutMs": 25000,
+    "allow": [
+      "steam_searchApps",
+      "steam_getAppDetails",
+      "steam_getPriceOverview",
+      "steam_getPlayerCount",
+      "steam_getAppReviewSummary",
+      "steam_getNewsForApp"
+    ],
+    "deny": [
+      "steam_setAchievement",
+      "steam_clearAchievement",
+      "steam_updateWorkshopItem",
+      "steam_uploadLeaderboardScore",
+      "steam_grantInventoryItem"
+    ],
+    "heavy": [
+      "steam_getAppReviewSummary"
+    ],
+    "ttlMs": {
+      "steam_searchApps": 3600000,
+      "steam_getAppDetails": 1800000,
+      "steam_getPriceOverview": 600000,
+      "steam_getPlayerCount": 120000,
+      "steam_getAppReviewSummary": 3600000,
+      "steam_getNewsForApp": 1800000
+    }
+  },
+  {
+    "name": "hltv",
+    "domain": "hltv",
+    "enabled": true,
+    "transport": "stdio",
+    "command": "/root/develop/mcp-servers/hltv-mcp/.venv/bin/hltv-mcp",
+    "args": [],
+    "env": {
+      "HLTV_BACKEND": "http",
+      "HLTV_MIN_INTERVAL": "3.0"
+    },
+    "initTimeoutMs": 60000,
+    "listTimeoutMs": 30000,
+    "toolTimeoutMs": 120000,
+    "allow": [
+      "hltv_search",
+      "hltv_get_matches",
+      "hltv_get_results",
+      "hltv_get_match",
+      "hltv_get_team_ranking",
+      "hltv_get_team",
+      "hltv_get_player",
+      "hltv_get_player_career",
+      "hltv_get_team_matches",
+      "hltv_get_head_to_head",
+      "hltv_get_events",
+      "hltv_get_live_scores"
+    ],
+    "deny": [
+      "hltv_get_match_stats",
+      "hltv_get_player_matchup",
+      "hltv_get_squad_matchup",
+      "hltv_get_kill_matrix",
+      "hltv_get_map_performance"
+    ],
+    "heavy": [],
+    "ttlMs": {
+      "hltv_get_team_ranking": 3600000,
+      "hltv_get_matches": 180000,
+      "hltv_get_results": 300000,
+      "hltv_get_team": 3600000,
+      "hltv_get_player": 3600000,
+      "hltv_get_events": 1800000
+    }
+  }
+]

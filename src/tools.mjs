@@ -1,40 +1,87 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { DIRS, log, readJson } from './core.mjs';
-import * as memory from './memory.mjs';
+import { createStdioClient } from './mcp/stdio.mjs';
 import { registerOpggTools } from './opgg.mjs';
 
 const registry = new Map();
+const clients = new Map();
+const cache = new Map();
 
-export function register(name, { description, schema, call }) {
-  registry.set(name, { name, description, schema, call });
+const TRUNCATE = Number(process.env.TOOL_OUTPUT_MAX || 4000);
+
+function inferDomain(name) {
+  if (name.startsWith('opgg_')) return 'opgg';
+  if (name.startsWith('steam_')) return 'steam';
+  if (name.startsWith('hltv_')) return 'hltv';
+  if (/^(get-schedule|get-live|get-leagues|get-event|get-match|get-upcoming)/.test(name)) return 'lol';
+  return 'internal';
+}
+
+export function register(name, { description, schema, call, domain, heavy = false, ttlMs = 0 }) {
+  registry.set(name, {
+    name,
+    domain: domain || inferDomain(name),
+    description: description || name,
+    schema: schema || { type: 'object', properties: {} },
+    call,
+    heavy,
+    ttlMs,
+  });
 }
 
 export function listTools() {
   return [...registry.values()].map((t) => ({ name: t.name, description: t.description, schema: t.schema }));
 }
 
+/** 域路由：只返回该域的工具（含完整 schema），用于"按需注入" */
+export function toolsByDomain(domain) {
+  return [...registry.values()]
+    .filter((t) => t.domain === domain)
+    .map((t) => ({ name: t.name, description: t.description, schema: t.schema, heavy: t.heavy }));
+}
+
+export function domains() {
+  return [...new Set([...registry.values()].map((t) => t.domain))];
+}
+
+export function toolMeta(name) {
+  const t = registry.get(name);
+  return t ? { name: t.name, domain: t.domain, heavy: t.heavy } : null;
+}
+
 export async function callTool(name, args) {
   const t = registry.get(name);
-  if (!t) return { ok: false, error: `没有工具 ${name}` };
+  if (!t) return { ok: false, error: `没有工具 ${name}`, code: 'tool_not_found' };
+
+  const key = `${name}:${JSON.stringify(args || {})}`;
+  if (t.ttlMs > 0) {
+    const hit = cache.get(key);
+    if (hit && Date.now() - hit.at < t.ttlMs) return { ok: true, result: hit.val, cached: true };
+  }
+
   try {
-    const out = await t.call(args || {});
+    let out = await t.call(args || {});
+    if (typeof out === 'string' && out.length > TRUNCATE) out = `${out.slice(0, TRUNCATE)}…[已截断]`;
+    if (t.ttlMs > 0) cache.set(key, { at: Date.now(), val: out });
     return { ok: true, result: out };
   } catch (e) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: e.message, code: e.code || 'tool_error' };
   }
 }
 
 /* ---------------- 内置工具 ---------------- */
 
+import * as memory from './memory.mjs';
+
 register('recall_memory', {
+  domain: 'internal',
   description: '在群里的历史事件/梗/战绩里检索，返回最相关的几条',
   schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
   call: ({ query }) => memory.searchEpisodes(query, 5).map((e) => e.text),
 });
 
 register('member_profile', {
+  domain: 'internal',
   description: '查询某个群友的画像：短板、梗、最近被锐评过的角度',
   schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
   call: ({ name }) => {
@@ -52,115 +99,85 @@ register('member_profile', {
   },
 });
 
-/* ---------------- OP.GG（Streamable HTTP，无需 config/mcp.json） ---------------- */
+/* ---------------- OP.GG（自带 HTTP 传输的适配器） ---------------- */
 
 registerOpggTools(register);
 
-/* ---------------- MCP 客户端（stdio, JSON-RPC 2.0 换行分隔） ---------------- */
+/* ---------------- 配置驱动的 MCP（stdio） ---------------- */
 
-const clients = [];
-
-function mcpClient({ name, command, args = [], env = {}, timeoutMs = 25000 }) {
-  const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } });
-  let buf = '';
-  let id = 0;
-  const pending = new Map();
-
-  child.stdout.on('data', (chunk) => {
-    buf += chunk.toString('utf8');
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line) continue;
-      try {
-        const msg = JSON.parse(line);
-        if (msg.id && pending.has(msg.id)) {
-          const { resolve } = pending.get(msg.id);
-          pending.delete(msg.id);
-          resolve(msg);
-        }
-      } catch {
-        // 忽略非 JSON 输出
-      }
-    }
-  });
-
-  child.stderr.on('data', (d) => log('mcp', name, d.toString().trim().slice(0, 200)));
-  child.on('exit', (code) => log('mcp', `${name} 退出 code=${code}`));
-
-  function request(method, params) {
-    id += 1;
-    const msgId = id;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(msgId);
-        reject(new Error(`MCP ${name} ${method} 超时`));
-      }, timeoutMs);
-
-      pending.set(msgId, {
-        resolve: (m) => {
-          clearTimeout(timer);
-          resolve(m);
-        },
-      });
-
-      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: msgId, method, params }) + '\n');
-    });
-  }
-
-  return { name, child, request };
-}
-
-export async function startMcp() {
+export async function startMcpServers() {
   const cfgFile = path.join(DIRS.config, 'mcp.json');
   const servers = readJson(cfgFile, []);
   if (!Array.isArray(servers) || !servers.length) {
-    log('mcp', '未配置 MCP（config/mcp.json），只用内置工具');
-    return 0;
+    log('mcp', 'config/mcp.json 为空，只加载内置与 OP.GG 工具');
+    return { servers: 0, tools: registry.size };
   }
 
-  let count = 0;
+  let okServers = 0;
   for (const cfg of servers) {
+    if (cfg.enabled === false) continue;
+    if ((cfg.transport || 'stdio') !== 'stdio') {
+      log('mcp', `${cfg.name} 跳过：transport=${cfg.transport}（目前只支持 stdio）`);
+      continue;
+    }
+
     try {
-      const c = mcpClient(cfg);
-      clients.push(c);
-
-      const init = await c.request('initialize', {
-        protocolVersion: '2024-11-05',
-        capabilities: {},
-        clientInfo: { name: 'jinha', version: '1.0.0' },
+      const client = createStdioClient({
+        name: cfg.name,
+        command: cfg.command,
+        args: cfg.args || [],
+        env: cfg.env || {},
+        timeoutMs: cfg.timeoutMs || 20_000,
       });
-      if (init.error) throw new Error(init.error.message);
+      clients.set(cfg.name, client);
 
-      const list = await c.request('tools/list', {});
-      for (const t of list.result?.tools || []) {
+      const info = await client.initialize({ timeout: cfg.initTimeoutMs || 60_000 });
+      const all = await client.listTools({ timeout: cfg.listTimeoutMs || 30_000 });
+
+      const allow = cfg.allow || null;
+      const deny = cfg.deny || [];
+      let injected = 0;
+
+      for (const t of all) {
+        if (deny.includes(t.name)) continue;
+        if (allow && !allow.includes(t.name)) continue;
         register(t.name, {
-          description: t.description || t.name,
-          schema: t.inputSchema || { type: 'object', properties: {} },
+          domain: cfg.domain || cfg.name,
+          description: t.description,
+          schema: t.inputSchema,
+          heavy: (cfg.heavy || []).includes(t.name),
+          ttlMs: (cfg.ttlMs || {})[t.name] || 0,
           call: async (args) => {
-            const r = await c.request('tools/call', { name: t.name, arguments: args });
-            if (r.error) throw new Error(r.error.message);
-            const content = r.result?.content || [];
-            return content.map((p) => p.text).filter(Boolean).join('\n').slice(0, 3000);
+            const r = await client.callTool(t.name, args, { timeout: cfg.toolTimeoutMs || 25_000 });
+            // 很多服务用 isError 或"文本里写错误"来表示失败，统一收敛成异常
+            const upstreamErr = /^(Failed to reach|Steam API request timed out|Unexpected response from|Error:|无法)/i.test(r.text);
+            let jsonErr = false;
+            try {
+              const j = JSON.parse(r.text);
+              if (j && typeof j === 'object' && j.error) jsonErr = true;
+            } catch {}
+            if (r.isError || upstreamErr || jsonErr) {
+              throw Object.assign(new Error(r.text.slice(0, 300)), { code: 'upstream_unavailable' });
+            }
+            return r.text;
           },
         });
-        count += 1;
+        injected += 1;
       }
-      log('mcp', `${cfg.name} 已接入，工具 ${(list.result?.tools || []).length} 个`);
+
+      log(
+        'mcp',
+        `${cfg.name} 握手 ok：${info?.serverInfo?.name || '?'} v${info?.serverInfo?.version || '?'} | 声明 ${all.length} 工具，注入 ${injected}`,
+      );
+      okServers += 1;
     } catch (e) {
       log('mcp', `${cfg.name} 接入失败：${e.message}`);
     }
   }
-  return count;
+
+  return { servers: okServers, tools: registry.size };
 }
 
-export function stopMcp() {
-  for (const c of clients) {
-    try {
-      c.child.kill();
-    } catch {
-      // ignore
-    }
-  }
+export function stopMcpServers() {
+  for (const c of clients.values()) c.close();
 }

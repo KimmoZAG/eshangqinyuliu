@@ -165,6 +165,17 @@ export async function startMcpServers() {
         injected += 1;
       }
 
+      // 厂商适配层：补 eventId 链路、拼接 VOD URL、把 TypeError 收敛成结构化错误
+      for (const rel of cfg.adapters || []) {
+        try {
+          const mod = await import(new URL(rel, `file://${process.cwd()}/`).href);
+          const fn = mod.default || mod.registerAdapters;
+          if (typeof fn === 'function') fn(register, client, cfg);
+        } catch (e) {
+          log('mcp', `${cfg.name} 适配器加载失败 ${rel}：${e.message}`);
+        }
+      }
+
       log(
         'mcp',
         `${cfg.name} 握手 ok：${info?.serverInfo?.name || '?'} v${info?.serverInfo?.version || '?'} | 声明 ${all.length} 工具，注入 ${injected}`,
@@ -176,6 +187,10 @@ export async function startMcpServers() {
   }
 
   return { servers: okServers, tools: registry.size };
+}
+
+export function clientOf(name) {
+  return clients.get(name);
 }
 
 export function stopMcpServers() {

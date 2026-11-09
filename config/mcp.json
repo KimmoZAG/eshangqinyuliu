@@ -86,5 +86,44 @@
       "hltv_get_player": 3600000,
       "hltv_get_events": 1800000
     }
+  },
+  {
+    "name": "lol",
+    "domain": "lol",
+    "enabled": true,
+    "transport": "stdio",
+    "command": "node",
+    "args": [
+      "/root/develop/mcp-servers/mcp-server-lol/dist/index.js"
+    ],
+    "env": {
+      "NODE_ENV": "production",
+      "LOL_API_BASE_URL": "https://esports-api.lolesports.com",
+      "LOL_API_KEY": "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z",
+      "HTTP_TIMEOUT": "15000",
+      "NODE_OPTIONS": "--dns-result-order=ipv4first"
+    },
+    "initTimeoutMs": 60000,
+    "listTimeoutMs": 30000,
+    "toolTimeoutMs": 60000,
+    "allow": [
+      "get-schedule",
+      "get-live-matches",
+      "get-leagues",
+      "get-event-details",
+      "get-match-vods",
+      "get-upcoming-matches",
+      "get-live-match-score"
+    ],
+    "deny": [],
+    "adapters": [
+      "./src/tools/lol-adapters.mjs"
+    ],
+    "ttlMs": {
+      "get-leagues": 3600000,
+      "get-upcoming-matches": 120000,
+      "get-schedule": 120000,
+      "get-event-details": 300000
+    }
   }
 ]

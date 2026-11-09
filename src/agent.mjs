@@ -73,7 +73,7 @@ async function fetchImage(url) {
 export async function composeReply({ key, speaker, uid, text, imageUrl, imageHint, limit = num('MAX_BURST', 5) }) {
   // 需要外部数据的问题先走工具通道（OP.GG 等），拿不到再回落普通应答
   const cfg = groupConfig(key);
-  const domain = pickDomain(text);
+  const domain = await pickDomain(text);
   if (cfg.features.search && domain) {
     trace({ kind: 'domain_route', key, domain });
     const viaTool = await planAndCompose({ key, speaker, uid, text, domain });
@@ -152,29 +152,71 @@ export async function decideInterject({ key, uid, speaker, text, cfg }) {
 
 /* ---------------- 慢通道：工具循环 ---------------- */
 
-const DOMAIN_HINTS = {
-  steam: /steam|游戏|多少钱|价格|打折|折扣|好评|评价|在线人数|销量|发售|新游|dlc|单机|库里/i,
-  lol: /赛程|赛果|比赛|战队|联赛|lpl|lck|世界赛|msi|vod|录像|比分|决赛|小组赛|直播/i,
-  hltv: /hltv|cs2|csgo|反恐|major|rating|世界排名|选手|教练|阵容|hltv/i,
-  opgg: /韩服|胜率|出场率|ban率|出装|符文|对线|克制|梯队|英雄|职业选手|rank|kda/i,
+const RULES = {
+  hltv: [
+    [/(cs2|csgo|counter[- ]?strike|反恐精英|hltv)/i, 6],
+    [/(^|[\s的])cs(战队|队|圈|比赛|选手|排名|第一)?/i, 4],
+    [/(major|blast|iem|katowice|rating)/i, 3],
+    [/(战队|世界第|排名|第一|最强|选手)/, 1],
+  ],
+  lol: [
+    [/(英雄联盟|\blol\b|lpl|lck|lec|lcs|msi|s赛|世界赛|季中赛)/i, 6],
+    [/(赛程|赛果|比分|决赛|小组赛|常规赛|季后赛|vod|录像|直播)/i, 3],
+    [/(战队|世界第|排名|第一|最强|选手)/, 1],
+  ],
+  steam: [
+    [/(steam|蒸汽平台)/i, 6],
+    [/(多少钱|价格|打折|折扣|好评|评价|在线人数|销量|发售|新游|dlc|单机|入库)/i, 3],
+    [/(游戏|好玩)/, 1],
+  ],
+  opgg: [
+    [/(韩服|op\.?gg)/i, 6],
+    [/(胜率|出场率|ban率|出装|符文|对线|克制|梯队|kda)/i, 3],
+    [/(英雄|职业选手|rank)/i, 1],
+  ],
 };
 
-/** 先选域，再按需注入该域工具与 schema（64 个工具不全量暴露） */
-export function pickDomain(text) {
+/** 关键词打分（同步、零成本） */
+export function keywordDomain(text) {
   const s = String(text || '');
-  const scored = [];
-  for (const [domain, re] of Object.entries(DOMAIN_HINTS)) {
-    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
-    const hits = (s.match(g) || []).length;
-    if (hits) scored.push({ domain, hits });
+  let best = null;
+  for (const [domain, rules] of Object.entries(RULES)) {
+    if (!toolsByDomain(domain).length) continue;
+    let score = 0;
+    for (const [re, w] of rules) if (re.test(s)) score += w;
+    if (score > 0 && (!best || score > best.score)) best = { domain, score };
   }
-  if (!scored.length) return null;
-  scored.sort((a, b) => b.hits - a.hits);
-  return scored[0].domain;
+  return best && best.score >= 2 ? best : null;
+}
+
+/**
+ * 两级路由：关键词命中直接走；没命中但像在问事实时，用一个 8 token 的小调用选域。
+ * 只注入该域的工具与 schema，64 个工具不全量暴露。
+ */
+export async function pickDomain(text) {
+  const kw = keywordDomain(text);
+  if (kw) return kw.domain;
+
+  const s = String(text || '');
+  if (s.length < 4 || !/[?？吗呢]|谁|什么|多少|哪个|第几|第一/.test(s)) return null;
+
+  try {
+    const out = await chat(
+      [
+        { role: 'system', content: '只输出一个词：steam / hltv / lol / opgg / none。判断这句话要查哪类数据，不确定就 none。' },
+        { role: 'user', content: s.slice(0, 120) },
+      ],
+      { effort: 'none', maxTokens: 8 },
+    );
+    const d = String(out).trim().toLowerCase().replace(/[^a-z]/g, '');
+    return ['steam', 'hltv', 'lol', 'opgg'].includes(d) && toolsByDomain(d).length ? d : null;
+  } catch {
+    return null;
+  }
 }
 
 export function wantsTools(text, cfg) {
-  return !!cfg.features.search && !!pickDomain(text);
+  return !!cfg.features.search && !!keywordDomain(text);
 }
 
 const BASE_PROTOCOL = `
@@ -267,39 +309,67 @@ export async function planAndCompose({ key, speaker, uid, text, domain }) {
   return null;
 }
 
-/* ---------------- 定时话题 ---------------- */
+/* ---------------- 定时话题（主动发言也能用工具） ---------------- */
 
-export async function buildTopic({ group, cfg }) {
-  const ctx = memory.buildContext(group, { limit: 30 });
-  // 定时话题是「拿一个关键词去搜资讯」，opgg_* 是结构化查询工具，参数对不上，必须排除
-  const tools = listTools().filter(
-    (t) => !['recall_memory', 'member_profile'].includes(t.name) && !t.name.startsWith('opgg_'),
-  );
-  const canSearch = cfg.features.search && tools.length > 0;
+async function gatherMaterial() {
+  const parts = [];
+  const has = (d, n) => toolsByDomain(d).some((t) => t.name === n);
 
-  let material = '';
-  if (canSearch) {
-    const searchName = tools[0].name;
-    const q = await chat(
-      [
-        { role: 'system', content: '你是话题策划。只输出一个搜索关键词，不要别的。' },
-        { role: 'user', content: `群里最近在聊：\n${ctx.slice(-600)}\n\n他们玩 LOL、CS、金铲铲。给一个能聊起来的最新资讯搜索词（版本更新/赛事/英雄改动），只输出词。` },
-      ],
-      { maxTokens: 40 },
-    ).catch(() => '');
+  if (has('lol', 'get-live-matches')) {
+    const r = await callTool('get-live-matches', { language: 'zh-CN' }).catch(() => null);
+    const t = r?.ok ? String(r.result) : '';
+    if (t && !/No live/i.test(t)) parts.push({ tag: 'lol_live', text: `正在打的 LoL：\n${t.slice(0, 700)}` });
+  }
 
-    if (q) {
-      const r = await callTool(searchName, { query: q.replace(/["'“”]/g, '').trim() });
-      if (r.ok && r.result) material = String(r.result).slice(0, 1200);
-      trace({ kind: 'topic_search', group, tool: searchName, ok: r.ok, query: q.slice(0, 40) });
+  if (parts.length < 2 && has('lol', 'get-upcoming-matches')) {
+    const r = await callTool('get-upcoming-matches', { language: 'zh-CN', limit: 3 }).catch(() => null);
+    const t = r?.ok ? String(r.result) : '';
+    if (t && !/❌|Error/i.test(t) && !/No upcoming/i.test(t)) {
+      parts.push({ tag: 'lol_upcoming', text: `最近的 LoL 赛程：\n${t.slice(0, 700)}` });
     }
   }
 
-  const basis = material
-    ? `你可以引用这条信息（别编造，别报没有的数字）：\n${material}`
-    : `没有外部信息，只能从今天的聊天里找话题，别编新闻。`;
+  if (parts.length < 2 && has('hltv', 'hltv_get_matches')) {
+    const r = await callTool('hltv_get_matches', {}).catch(() => null);
+    if (r?.ok) {
+      try {
+        const j = JSON.parse(String(r.result));
+        const rows = (j.matches || []).slice(0, 4).map((m) => `${m.team1} vs ${m.team2}${m.event ? `（${m.event}）` : ''}`);
+        if (rows.length) parts.push({ tag: 'hltv_matches', text: `CS 近期赛程：${rows.join('；')}` });
+      } catch {
+        // 结构变了就算了，不编数据
+      }
+    }
+  }
 
-  const user = `群里最近的聊天：\n${ctx}\n\n${basis}\n\n现在没人说话，你主动抛一个话题，1-2 行，每行不超过 40 字，不@任何人，别说教、别像播报。`;
+  if (parts.length < 2 && has('hltv', 'hltv_get_team_ranking')) {
+    const r = await callTool('hltv_get_team_ranking', {}).catch(() => null);
+    if (r?.ok) {
+      try {
+        const j = JSON.parse(String(r.result));
+        const top = (j.ranking || []).slice(0, 5).map((x) => `#${x.rank} ${x.team}(${x.points})`);
+        if (top.length) parts.push({ tag: 'hltv_rank', text: `CS 世界排名前五：${top.join('，')}` });
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return parts;
+}
+
+export async function buildTopic({ group, cfg }) {
+  const ctx = memory.buildContext(group, { limit: 30 });
+  const parts = cfg.features.search ? await gatherMaterial() : [];
+
+  const material = parts.length ? parts.map((p) => `[${p.tag}]\n${p.text}`).join('\n\n') : '';
+  trace({ kind: 'topic_material', group, tags: parts.map((p) => p.tag) });
+
+  const basis = material
+    ? `下面是可以引用的真实数据（只许用这里出现的队伍/时间/比分/数字，不许编）：\n${material}`
+    : '没有外部数据，只能从今天的聊天里找话题，别编新闻和比分。';
+
+  const user = `群里最近的聊天：\n${ctx}\n\n${basis}\n\n现在没人说话，你主动抛一个话题，1-2 行，每行不超过 40 字，不@任何人，别说教、别像播报。如果上面有具体数据，至少点出一个队名或一个数字，别只说“没想到”。`;
 
   const out = await chat([{ role: 'system', content: systemPrompt() }, { role: 'user', content: user }], {
     effort: 'none',

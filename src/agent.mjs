@@ -335,10 +335,12 @@ const DOMAIN_PROTOCOL = {
 - 判断职业选手只看 is_pro，不许凭段位或 ID 猜。`,
   steam: `
 【Steam 专用】
-- 涉及具体游戏先用 steam_searchApps 找 appid，再用 appid 查详情/价格/在线人数。
+- 问「最受欢迎 / 最热 / 在线最多 / 排行榜」→ 必须用 steam_most_played，不要用 steam_getPlayerCount。
+- steam_getPlayerCount / steam_app_players 只回答「某个游戏现在多少人」，不能拿单个游戏的数字回答排行榜问题。
+- 涉及具体游戏先用 steam_searchApps 找 appid，再查详情/价格/在线人数。
 - 价格照抄返回的币种和数字，不许换算成人民币，不许说"约"。
-- 评价只用 review summary 里的数值；拿不到就说拿不到。
-- player_count 是在线人数，不是销量，不许混。`,
+- 排行榜返回的是 24 小时峰值，不是当前在线，说的时候要讲清楚。
+- 评价只用 review summary 里的数值；拿不到就说拿不到。`,
   lol: `
 【LoL 赛事专用】
 - 工具返回是纯文本（markdown），不是 JSON，不要尝试解析结构。

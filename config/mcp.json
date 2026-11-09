@@ -40,7 +40,10 @@
       "steam_getPlayerCount": 120000,
       "steam_getAppReviewSummary": 3600000,
       "steam_getNewsForApp": 1800000
-    }
+    },
+    "adapters": [
+      "./src/tools/steam-adapters.mjs"
+    ]
   },
   {
     "name": "hltv",

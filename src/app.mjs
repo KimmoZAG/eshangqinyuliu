@@ -23,6 +23,13 @@ function bindAlias(text) {
   return ALIASES[m[1].toLowerCase()] || Object.values(ALIASES).find((n) => n === m[1]) || null;
 }
 
+
+/** 把自己发出去的话也记进上下文，避免复读自己 */
+function remember(key, lines, results) {
+  const ok = (results || []).filter((r) => r.ok).length;
+  for (let i = 0; i < Math.min(ok, lines.length); i += 1) memory.addSelf(key, lines[i]);
+}
+
 function atts(d) {
   return (d.attachments || []).map((a) => ({ t: a.content_type, url: a.url, n: a.filename }));
 }
@@ -121,7 +128,7 @@ async function onGroupMessage(evt) {
       limit: cfg.replyLimit || 5,
     });
 
-    await sendLines({
+    const sent = await sendLines({
       scope: 'group',
       group,
       lines,
@@ -130,6 +137,7 @@ async function onGroupMessage(evt) {
       turnId,
       deadlineMs: REPLY_WINDOW,
     });
+    remember(group, lines, sent);
 
     lastSpeak.set(group, Date.now());
     agent.reflect({ key: group, uid, speaker, text, replyLines: lines });
@@ -165,13 +173,15 @@ async function onGroupMessage(evt) {
     limit: 2,
   });
 
-  await sendLines({
+  const one = lines.slice(0, 1);
+  const sentIj = await sendLines({
     scope: 'group',
     group,
-    lines: lines.slice(0, 1),
+    lines: one,
     kind: 'proactive',
     turnId: `ij:${group}:${d.id}`,
   });
+  remember(group, one, sentIj);
 
   lastSpeak.set(group, Date.now());
   agent.reflect({ key: group, uid, speaker, text, replyLines: lines });

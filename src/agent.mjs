@@ -109,6 +109,44 @@ export function sanitizeLines(lines) {
     .slice(0, 5);
 }
 
+
+/* ---------------- 复读与低信息量 ---------------- */
+
+const LOW_INFO = /^[\s\S]{0,4}$|^(6+|哈+|呵+|草|卧槽|牛逼|牛|好|在|嗯|哦|ok|OK|👍|？+|\?+|啊+|欸+)[\s!！。~～?？]*$/i;
+
+export function isLowInfo(text) {
+  const t = String(text || '').trim();
+  if (LOW_INFO.test(t)) return true;
+  return t.length <= 10 && /^(666+|哈哈哈+|呵呵+|卧槽|牛啊|太强了|笑死)/.test(t);
+}
+
+function bigrams(s) {
+  const t = String(s || '').replace(/[\s\p{P}]/gu, '');
+  const out = new Set();
+  for (let i = 0; i < t.length - 1; i += 1) out.add(t.slice(i, i + 2));
+  return out;
+}
+
+/** 字符集合重叠度：抓“换词改写同一句话”比 bigram 更灵敏 */
+export function overlap(a, b) {
+  const norm = (x) => new Set(String(x || '').replace(/[\s\p{P}]/gu, '').split(''));
+  const A = norm(a);
+  const B = norm(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter += 1;
+  return inter / Math.min(A.size, B.size);
+}
+
+export function similarity(a, b) {
+  const A = bigrams(a);
+  const B = bigrams(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter += 1;
+  return inter / Math.min(A.size, B.size);
+}
+
 /* ---------------- 快通道：应答 ---------------- */
 
 export async function composeReply({ key, speaker, uid, text, imageUrl, imageHint, limit = num('MAX_BURST', 5) }) {
@@ -126,10 +164,15 @@ export async function composeReply({ key, speaker, uid, text, imageUrl, imageHin
 
   const person = findPerson(text);
   const angle = pickAngle(person);
-  const ctx = memory.buildContext(key, { query: text, memberIds: [uid, person?.id].filter(Boolean) });
+  const ctx = memory.buildContext(key, { limit: 12, query: text, memberIds: [uid, person?.id].filter(Boolean) });
 
   const angleHint = angle ? `\n如果要锐评${person.name}，这次用「${angle}」这个角度，别用别的。` : '';
-  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(limit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}`;
+  const said = memory.recentSelf(key, 3);
+  const saidHint = said.length ? `\n你刚才已经说过：${said.map((x) => `「${x}」`).join('、')}。不要换个说法再说一遍同样的意思。` : '';
+  const lowInfo = isLowInfo(text)
+    ? '\n对方只是随口应了一声，不要复述上文、不要补充信息、不要分析，就回一句很短的（不超过 10 个字），或者顺着怼一句。'
+    : '';
+  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(limit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}${saidHint}${lowInfo}`;
 
   const messages = [{ role: 'system', content: systemPrompt() }];
   const img = imageUrl ? await fetchImage(imageUrl) : null;
@@ -162,7 +205,13 @@ export async function composeReply({ key, speaker, uid, text, imageUrl, imageHin
   }
 
   let lines = sanitizeLines(splitReplies(out, limit));
-  if (!lines.length) lines = ['我刚卡了一下，你再说一遍'];
+
+  // 和自己最近说过的话比对，太重就丢掉
+  const recent = memory.recentSelf(key, 3);
+  if (recent.length) {
+    lines = lines.filter((l) => !recent.some((r) => similarity(l, r) > 0.6 || overlap(l, r) > 0.55));
+  }
+  if (!lines.length) lines = isLowInfo(text) ? ['嗯 就这'] : ['我刚卡了一下 你再说一遍'];
 
   if (person && angle) memory.markAngle(person.id, angle);
   return lines;

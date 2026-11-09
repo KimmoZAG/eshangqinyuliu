@@ -18,6 +18,31 @@ export function loadWorking(key) {
   return arr;
 }
 
+/** 记录机器人自己发出去的话，避免复读自己 */
+export function addSelf(key, text) {
+  const row = {
+    id: `self:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`,
+    ts: new Date().toISOString(),
+    u: '',
+    n: '你',
+    c: String(text || '').trim().slice(0, 200),
+    self: true,
+    att: [],
+  };
+  if (!row.c) return;
+  const arr = loadWorking(key);
+  arr.push(row);
+  if (arr.length > MAX_WORKING) arr.splice(0, arr.length - MAX_WORKING);
+  appendLine(wfile(key), row);
+}
+
+export function recentSelf(key, n = 3) {
+  return loadWorking(key)
+    .filter((m) => m.self)
+    .slice(-n)
+    .map((m) => m.c);
+}
+
 export function addMessage(key, rec) {
   const arr = loadWorking(key);
   if (rec.id && arr.some((r) => r.id === rec.id)) return false;
@@ -151,7 +176,7 @@ export function searchEpisodes(query, limit = 5) {
 export function buildContext(key, { limit = 40, query = '', memberIds = [], anglesFor = [] } = {}) {
   const rows = recent(key, limit);
   const lines = rows.length
-    ? rows.map((m) => `${hhmm(m.ts)} ${m.n}：${m.c || '（发了东西）'}${m.att?.length ? ` [${m.att.map((a) => a.t).join(',')}]` : ''}`).join('\n')
+    ? rows.map((m) => `${hhmm(m.ts)} ${m.self ? '你（金桦）' : m.n}：${m.c || '（发了东西）'}${m.att?.length ? ` [${m.att.map((a) => a.t).join(',')}]` : ''}`).join('\n')
     : '（今天还没有聊天记录）';
 
   const eps = searchEpisodes(query || rows.slice(-3).map((r) => r.c).join(' '), 5);

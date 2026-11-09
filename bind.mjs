@@ -8,7 +8,9 @@
  *   node --env-file=.env bind.mjs revoke ZRC-ABCDE
  *   node --env-file=.env bind.mjs who                     # 已认出的人
  */
-import { createCode, listCodes, revoke, boundPeople } from './src/bindings.mjs';
+import { createCode, listCodes, revoke, boundPeople, unknownSpeakers } from './src/bindings.mjs';
+import * as memory from './src/memory.mjs';
+import { ALIASES } from './persona.mjs';
 
 const [cmd, ...rest] = process.argv.slice(2);
 
@@ -43,6 +45,38 @@ switch (cmd) {
   case 'revoke':
     console.log(revoke(rest[0]) ? '已删除' : '没这个码');
     break;
+  case 'map': {
+    const [prefix, name] = rest;
+    if (!prefix || !name) {
+      console.log('用法：node bind.mjs map <openid前缀> <名字>');
+      break;
+    }
+    const hits = Object.keys(memory.profileTable()).filter((id) => id.startsWith(prefix));
+    if (hits.length !== 1) {
+      console.log(hits.length ? `前缀不唯一，命中 ${hits.length} 个：\n${hits.join('\n')}` : '没这个 openid');
+      break;
+    }
+    memory.setAlias(hits[0], name);
+    console.log(`已绑定 ${hits[0]} -> ${name}`);
+    break;
+  }
+  case 'unknown': {
+    const rows = unknownSpeakers({ limit: 20 });
+    if (!rows.length) {
+      console.log('没有待认的人，都绑好了');
+      break;
+    }
+    console.log('还没绑定的发言人（按最近发言排序）：\n');
+    for (const r of rows) {
+      const t = String(r.firstText).replace(/\s+/g, ' ').slice(0, 42);
+      console.log(`${r.nick.padEnd(16)} ${r.openid.slice(0, 16)}  ${String(r.count).padStart(3)} 条  「${t}」`);
+    }
+    const boundNames = new Set(boundPeople().map((x) => x.name));
+    const missing = [...new Set(Object.values(ALIASES))].filter((n) => !boundNames.has(n));
+    if (missing.length) console.log(`\n名单里还没出现的：${missing.join('、')}`);
+    console.log('\n绑定：node bind.mjs map <openid前16位> <名字>');
+    break;
+  }
   case 'who': {
     const rows = boundPeople();
     if (!rows.length) console.log('还没人绑定');

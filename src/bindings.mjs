@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { DIRS, readJson, writeJson, log } from './core.mjs';
 import * as memory from './memory.mjs';
@@ -92,6 +93,90 @@ export function revoke(code) {
 /** 当前已认出来的人（openid 是平台 id，无法反查 QQ 号） */
 export function boundPeople() {
   return Object.entries(memory.profileTable())
-    .filter(([, p]) => p.name)
+    .filter(([, p]) => p.bound && p.name)
     .map(([openid, p]) => ({ openid, name: p.name }));
+}
+
+
+/* ---------------- 尚未绑定的人 ---------------- */
+
+function* allRecords() {
+  const base = path.join(DIRS.working);
+  let dirs = [];
+  try {
+    dirs = fs.readdirSync(base);
+  } catch {
+    dirs = [];
+  }
+  for (const d of dirs) {
+    const dir = path.join(base, d);
+    let files = [];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+    } catch {
+      continue;
+    }
+    for (const f of files.sort()) {
+      for (const line of fs.readFileSync(path.join(dir, f), 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          yield JSON.parse(line);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+  // 旧版消息库（新系统上线前的记录）
+  try {
+    for (const line of fs.readFileSync(path.join(DIRS.data, 'messages.jsonl'), 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line);
+        yield { ts: r.ts, u: r.u, n: r.n, c: r.c };
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // 没有就算了
+  }
+}
+
+/** 还没绑定的发言人，按最近发言排序，带第一句话方便认人 */
+export function unknownSpeakers({ limit = 20 } = {}) {
+  const bound = memory.profileTable();
+  const map = new Map();
+
+  for (const r of allRecords()) {
+    const uid = r.u;
+    if (!uid || r.self) continue;
+    if (bound[uid]?.bound) continue;
+
+    const text = String(r.c || '').trim();
+    const cur = map.get(uid);
+    if (!cur) {
+      map.set(uid, {
+        openid: uid,
+        nick: r.n || '',
+        count: 1,
+        firstTs: r.ts,
+        firstText: text,
+        lastTs: r.ts,
+      });
+    } else {
+      cur.count += 1;
+      cur.nick = r.n || cur.nick;
+      if (r.ts && r.ts < cur.firstTs) {
+        cur.firstTs = r.ts;
+        cur.firstText = text;
+      }
+      if (r.ts && r.ts > (cur.lastTs || '')) cur.lastTs = r.ts;
+    }
+  }
+
+  return [...map.values()]
+    .filter((x) => x.firstText)
+    .sort((a, b) => String(b.lastTs).localeCompare(String(a.lastTs)))
+    .slice(0, limit);
 }

@@ -93,6 +93,8 @@ export function profile(id) {
 export function setAlias(id, name) {
   const p = profile(id);
   p.name = name;
+  p.bound = true;          // 真正确认过身份（口令 or 管理员指认）
+  p.boundAt = new Date().toISOString();
   saveProfiles();
 }
 

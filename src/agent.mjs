@@ -174,10 +174,13 @@ export async function composeReply({ key, speaker, uid, text, imageUrl, imageHin
   const angleHint = angle ? `\n如果要锐评${person.name}，这次用「${angle}」这个角度，别用别的。` : '';
   const said = memory.recentSelf(key, 3);
   const saidHint = said.length ? `\n你刚才已经说过：${said.map((x) => `「${x}」`).join('、')}。不要换个说法再说一遍同样的意思。` : '';
+  const rosterNames = [...Object.keys(ALIASES), ...Object.values(ALIASES)];
+  const calledOut = [...new Set(rosterNames.filter((n) => said.some((r) => r.includes(n))))];
+  const nameHint = calledOut.length ? `\n你刚点过名：${calledOut.join('、')}。这条别再把名字放句首，能不点就不点。` : '';
   const lowInfo = isLowInfo(text)
     ? '\n对方只是随口应了一声，不要复述上文、不要补充信息、不要分析，就回一句很短的（不超过 10 个字），或者顺着怼一句。'
     : '';
-  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(limit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}${saidHint}${lowInfo}`;
+  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(limit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}${saidHint}${nameHint}${lowInfo}`;
 
   const messages = [{ role: 'system', content: systemPrompt() }];
   const img = imageUrl ? await fetchImage(imageUrl) : null;
@@ -216,6 +219,19 @@ export async function composeReply({ key, speaker, uid, text, imageUrl, imageHin
   if (recent.length) {
     lines = lines.filter((l) => !recent.some((r) => similarity(l, r) > 0.6 || overlap(l, r) > 0.55));
   }
+  // 上一两条已经点过的人，这条开头再点名就去掉（保留后面的话）
+  if (recent.length) {
+    const roster = [...Object.keys(ALIASES), ...Object.values(ALIASES)];
+    lines = lines.map((l) => {
+      for (const n of roster) {
+        if (l.startsWith(n) && recent.some((r) => r.includes(n))) {
+          return l.slice(n.length).replace(/^[\s,，:：]+/, '') || l;
+        }
+      }
+      return l;
+    });
+  }
+
   if (!lines.length) lines = isLowInfo(text) ? ['嗯 就这'] : ['我刚卡了一下 你再说一遍'];
 
   if (person && angle) memory.markAngle(person.id, angle);

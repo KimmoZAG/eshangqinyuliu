@@ -13,6 +13,7 @@ Object.assign(process.env, {
   LLM_API_KEY: 'fixture',
   QQ_APP_ID: 'fixture',
   QQ_APP_SECRET: 'fixture',
+  BOT_NAME: '金桦',
   SEND_GAP_MS: '0',
   DATA_TOOLS_ENABLED: '0',
   SEARCH_ENABLED: '0',
@@ -27,6 +28,9 @@ const { normalize } = await import('../src/transport.mjs');
 const { DIRS, patchGroupConfig, writeJson } = await import('../src/core.mjs');
 const { callTool, listTools, register, startMcpServers } = await import('../src/tools.mjs');
 const memory = await import('../src/memory.mjs');
+const { runTopic } = await import('../src/jobs.mjs');
+const { readMembers, saveAlias, setNickname } = await import('../src/members.mjs');
+const { createCode } = await import('../src/bindings.mjs');
 
 function group(group, id, content, { at = true, author = 'member', timestamp = new Date().toISOString() } = {}) {
   return normalize({
@@ -51,7 +55,8 @@ function fixture(t, model, send) {
     const request = JSON.parse(body);
     if (endpoint.hostname === 'model.invalid') {
       const stage = request.messages[0].content.match(/^\[([^\]]+)]/)?.[1];
-      const input = JSON.parse(request.messages[1].content);
+      const userContent = request.messages[1].content;
+      const input = userContent.startsWith('{') ? JSON.parse(userContent) : userContent;
       prompts.push({ stage, input, request });
       const answer = await model(stage, input, request);
       const choice = typeof answer === 'string'
@@ -213,7 +218,7 @@ test('短追问沿用会话的赛事对象并逐题成稿', async (t) => {
     return grounded(input.questions, ['队伍甲赢了', '2 比 1']);
   });
   await handleEvent(group('follow-up', 'short', '谁赢了？几比几？'));
-  assert.match(prompts[0].input.context, /昨天 LPL 那场/);
+  assert.ok(prompts[0].input.context.some(({ text }) => text.includes('昨天 LPL 那场')));
   assert.equal(prompts[2].input.previous?.id, 'q1');
   assert.deepEqual(sent.map(({ content }) => content), ['队伍甲赢了', '2 比 1']);
 });
@@ -237,9 +242,77 @@ test('闲聊和禁用工具的问句不会先做路由，群聊记忆不会串�
   assert.equal(sent[1].content, '这项查询没开');
   await handleEvent(group('casual', 'claim', '刚才一穿三'));
   assert.equal(memory.memberClaims('casual', 'member')[0]?.sourceId, 'claim');
-  assert.match(memory.buildContext('casual', { query: '一穿三' }), /一穿三/);
-  assert.doesNotMatch(memory.buildContext('other', { query: '一穿三' }), /一穿三/);
-  assert.doesNotMatch(memory.buildContext('c2c:member', { query: '一穿三' }), /一穿三/);
+  assert.equal(memory.readContext('casual', { query: '一穿三' }).episodes[0]?.sourceId, 'claim');
+  assert.deepEqual(memory.readContext('other', { query: '一穿三' }).episodes, []);
+  assert.deepEqual(memory.readContext('c2c:member', { query: '一穿三' }).episodes, []);
+});
+
+test('发送过滤掉前一行后，群聊和定时话题都只记收到回执的内容', async (t) => {
+  const { sent } = fixture(t, () => '@金桦\n到了');
+  await handleEvent(group('receipt', 'trigger', '你来啦'));
+  await runTopic('receipt-topic', { manual: true, sourceId: 'topic-trigger' });
+  assert.deepEqual(sent.map(({ content }) => content), ['到了', '到了']);
+  for (const [key, id] of [['receipt', 'trigger'], ['receipt-topic', 'topic-trigger']]) {
+    const record = memory.recent(key).filter(({ self }) => self);
+    assert.equal(record.length, 1);
+    assert.equal(record[0].c, '到了');
+    assert.equal(record[0].sourceId, id);
+    assert.ok(record[0].id.startsWith('ack-'));
+    assert.ok(record[0].turnId);
+  }
+});
+
+test('自报昵称只用于称呼，已绑定的成员同时用于熟人语气和真实提及', async (t) => {
+  const selfNamed = 'A'.repeat(32);
+  const bound = 'B'.repeat(32);
+  setNickname(selfNamed, '张睿诚');
+  assert.equal(readMembers([selfNamed]).get(selfNamed).canMention, false);
+  const { prompts, sent } = fixture(t, () => '@zrc 你来一下');
+  await handleEvent(group('directory', 'nickname', '我到啦', { author: selfNamed }));
+  assert.equal(sent[0].content, '@zrc 你来一下');
+  assert.doesNotMatch(prompts[0].request.messages[0].content, /对诚哥比对其他人软一点/);
+
+  setNickname(bound, '旧称呼');
+  saveAlias(bound, '张睿诚');
+  assert.equal(setNickname(bound, '后来自报的称呼'), '张睿诚');
+  await handleEvent(group('directory', 'bound', '我到啦', { author: bound }));
+  assert.equal(sent[1].markdown.content, '<qqbot-at-user id="' + bound + '" /> 你来一下');
+  assert.match(prompts[1].request.messages[0].content, /对诚哥比对其他人软一点/);
+  assert.equal(prompts[1].input.speaker, '张睿诚');
+  assert.equal(memory.recentSelf('directory').at(-1), '@张睿诚 你来一下');
+});
+
+test('口令绑定经正常命令入口立即进入成员目录，重复兑换沿用当前绑定', async (t) => {
+  const openid = 'C'.repeat(32);
+  const { code } = createCode({ name: '测试队友' });
+  const { sent } = fixture(t, () => assert.fail('绑定命令不应调用模型'));
+  await handleEvent(group('binding', 'bind-first', '/绑定 ' + code, { author: openid }));
+  assert.equal(readMembers([openid]).get(openid).canMention, true);
+  assert.match(sent[0].content, /记下了/);
+  saveAlias(openid, '更新后的队友');
+  await handleEvent(group('binding', 'bind-repeat', '/绑定 ' + code, { author: openid }));
+  assert.equal(readMembers([openid]).get(openid).name, '更新后的队友');
+  assert.match(sent[1].content, /更新后的队友/);
+});
+
+test('规划只读精简前文，成稿可读同一会话的事件卡和完整窗口', async (t) => {
+  const key = 'stage-context';
+  patchGroupConfig(key, { features: { tools: true, search: false } });
+  memory.addEpisode({ key, sourceId: 'old-claim', about: ['member'], text: '旧事 一穿三是在训练赛', type: 'claim' });
+  for (let i = 1; i <= 9; i += 1) memory.addMessage(key, { id: 'prior-' + i, u: 'member', n: '队友', c: '前文 ' + i });
+  register('lol_recent_results', { domain: 'lol', call: () => ({ winner: '队伍甲' }) });
+  const { prompts, sent } = fixture(t, (stage, input) => {
+    if (stage === 'route') return { routes: [{ id: 'q1', domain: 'lol' }] };
+    if (stage === 'tool-plan') return { tool: 'lol_recent_results', args: {}, finishAfter: true };
+    return grounded(input.questions, ['队伍甲赢了']);
+  });
+  await handleEvent(group(key, 'stages', '一穿三那场谁赢了？'));
+  const planning = prompts.find(({ stage }) => stage === 'tool-plan').input.context;
+  assert.deepEqual(planning.map(({ text }) => text), ['前文 4', '前文 5', '前文 6', '前文 7', '前文 8', '前文 9']);
+  const final = prompts.find(({ stage }) => stage === 'answer-by-id').input.context;
+  assert.match(final, /前文 1/);
+  assert.match(final, /旧事 一穿三是在训练赛/);
+  assert.equal(sent[0].content, '队伍甲赢了');
 });
 
 test('插话语气和目标进成稿，已经过时的主动插话不发', async (t) => {

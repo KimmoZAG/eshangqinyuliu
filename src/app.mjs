@@ -4,11 +4,11 @@ import * as pipeline from './pipeline.mjs';
 import * as memory from './memory.mjs';
 import * as agent from './agent.mjs';
 import { runPlugin, runSession, commandOf, pluginList } from './plugins.mjs';
-import { sendLines } from './outbox.mjs';
+import { deliver } from './delivery.mjs';
 import { startJobs, noteGroup, runTopic, ensure } from './jobs.mjs';
 import { startMcpServers, listTools } from './tools.mjs';
 import { ALIASES } from '../persona.mjs';
-import { loadAliases } from './bindings.mjs';
+import { nameOf, setNickname } from './members.mjs';
 
 const BOT_NAME = process.env.BOT_NAME || '金桦';
 const REPLY_WINDOW = num('REPLY_WINDOW_MS', 4.5 * 60 * 1000);
@@ -29,24 +29,11 @@ function bindAlias(text) {
 }
 
 
-/** 把自己发出去的话也记进上下文，避免复读自己 */
-async function deliver(key, options) {
-  const results = await sendLines(options);
-  const delivered = [];
-  for (const result of results) {
-    if (!result.ok) continue;
-    const line = options.lines[result.index];
-    memory.addSelf(key, line, { id: result.id, sourceId: options.msgId });
-    delivered.push(line);
-  }
-  return delivered;
-}
-
 function replyTurn(key, data, receivedAt, window) {
   const sentAt = typeof data.timestamp === 'number'
     ? data.timestamp * (data.timestamp < 1e12 ? 1000 : 1) : Date.parse(data.timestamp);
   const origin = Number.isFinite(sentAt) ? Math.min(sentAt, receivedAt) : receivedAt;
-  return { turnId: key + ':' + (data.id || newId()), receivedAt, deadline: origin + window };
+  return { turnId: key + ':' + (data.id || newId()), sourceId: data.id, receivedAt, deadline: origin + window };
 }
 
 function atts(d) {
@@ -83,7 +70,7 @@ async function onGroupMessage(evt, receivedAt) {
     }
   }
   const cfg = groupConfig(group);
-  const speaker = memory.nameOf(uid, author.username);
+  const speaker = nameOf(uid, author.username);
   const override = agent.parseReplyMode(text, cfg.replyMode);
   const isAt = mentioned || override.explicit;
 
@@ -110,11 +97,11 @@ async function onGroupMessage(evt, receivedAt) {
   if (cmd && !override.explicit) {
     const out = runPlugin(ctx, text);
     if (out?.triggerTopic) {
-      await runTopic(group, { manual: true });
+      await runTopic(group, { manual: true, sourceId: d.id });
       return;
     }
     if (out?.lines) {
-      await deliver(group, { ...turn, group, lines: out.lines, kind: 'command', msgId: mentioned ? d.id : undefined });
+      await deliver({ ...turn, group, lines: out.lines, kind: 'command', msgId: mentioned ? d.id : undefined });
     }
     return;
   }
@@ -125,7 +112,7 @@ async function onGroupMessage(evt, receivedAt) {
     if (s) {
       const out = runSession(ctx, text);
       if (out?.lines) {
-        await deliver(group, { ...turn, group, lines: out.lines, kind: 'command' });
+        await deliver({ ...turn, group, lines: out.lines, kind: 'command' });
       }
       return;
     }
@@ -134,8 +121,8 @@ async function onGroupMessage(evt, receivedAt) {
   // 3) 认人
   const bound = !override.explicit && bindAlias(text);
   if (bound && uid) {
-    const name = memory.setAlias(uid, bound, { verified: false });
-    await deliver(group, {
+    const name = setNickname(uid, bound);
+    await deliver({
       ...turn,
       scope: 'group',
       group,
@@ -164,7 +151,7 @@ async function onGroupMessage(evt, receivedAt) {
       cfg,
     });
 
-    const delivered = await deliver(group, {
+    const delivered = await deliver({
       ...turn,
       scope: 'group',
       group,
@@ -207,7 +194,7 @@ async function onGroupMessage(evt, receivedAt) {
       cfg, mode: 'fast', limit: 1, interject: { tone: decision.tone, target: decision.target },
       imageUrl: image?.url, imageHint: !!image,
     });
-    const delivered = await deliver(group, { ...turn, deadline, group, lines, kind: 'proactive', shouldSend });
+    const delivered = await deliver({ ...turn, deadline, group, lines, kind: 'proactive', shouldSend });
     if (delivered.length) {
       pipeline.markInterject(group);
       lastSpeak.set(group, Date.now());
@@ -234,7 +221,7 @@ async function onC2C(evt, receivedAt) {
   if (receivedAt >= turn.deadline) return;
   const cfg = groupConfig(key);
   const override = agent.parseReplyMode(text, cfg.replyMode);
-  const speaker = memory.nameOf(openid, author.username || '你');
+  const speaker = nameOf(openid, author.username || '你');
 
   if (!memory.addMessage(key, {
     id: d.id,
@@ -248,8 +235,8 @@ async function onC2C(evt, receivedAt) {
 
   const bound = !override.explicit && bindAlias(text);
   if (bound) {
-    const name = memory.setAlias(openid, bound, { verified: false });
-    await deliver(key, { ...turn, scope: 'c2c', openid, lines: ['行 记下了 你是' + name], msgId: d.id });
+    const name = setNickname(openid, bound);
+    await deliver({ ...turn, scope: 'c2c', openid, lines: ['行 记下了 你是' + name], msgId: d.id });
     return;
   }
 
@@ -260,7 +247,7 @@ async function onC2C(evt, receivedAt) {
     imageUrl: image?.url, imageHint: !!image, limit: Math.min(cfg.replyLimit, 4),
   });
 
-  const delivered = await deliver(key, {
+  const delivered = await deliver({
     ...turn,
     scope: 'c2c',
     openid,
@@ -289,23 +276,13 @@ async function onNotice(evt) {
       setting === 'all'
         ? ['我进来了。诚哥在不在？今晚谁开黑，先说好谁菜。']
         : ['我进来了。先去我资料页把“接收消息”开一下，不然我只能看见有人@我。'];
-    await sendLines({ scope: 'group', group, lines, kind: 'proactive', turnId: `join:${group}` });
+    await deliver({ scope: 'group', group, lines, kind: 'proactive', turnId: `join:${group}` });
   }
 
   if (evt.sub === 'group_del_robot' && group) forgetGroup(group);
 }
 
 /* ---------------- 启动 ---------------- */
-
-/** 合并 CLI 写入的绑定表（机器人只读，避免和 CLI 抢写 profiles.json） */
-function applyAliases() {
-  const aliases = loadAliases();
-  for (const [openid, v] of Object.entries(aliases)) {
-    if (!v?.name) continue;
-    const p = memory.profile(openid);
-    if (p.name !== v.name || !p.verified) memory.setAlias(openid, v.name);
-  }
-}
 
 export async function handleEvent(evt, raw = {}) {
   const receivedAt = Date.now();
@@ -316,8 +293,6 @@ export async function handleEvent(evt, raw = {}) {
 }
 
 export async function startApp() {
-  applyAliases();
-  setInterval(applyAliases, 60_000);
   const boot = await startMcpServers();
   const tools = boot.tools;
   const opgg = listTools().filter((t) => t.name.startsWith('opgg_')).length;

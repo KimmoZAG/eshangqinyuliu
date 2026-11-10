@@ -8,8 +8,8 @@
  *   node --env-file=.env bind.mjs revoke ZRC-ABCDE
  *   node --env-file=.env bind.mjs who                     # 已认出的人
  */
-import { createCode, listCodes, revoke, boundPeople, unknownSpeakers, saveAlias } from './src/bindings.mjs';
-import * as memory from './src/memory.mjs';
+import { createCode, listCodes, revoke, boundPeople, unknownSpeakers } from './src/bindings.mjs';
+import { readMembers, saveAlias } from './src/members.mjs';
 import { ALIASES } from './persona.mjs';
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -51,7 +51,7 @@ switch (cmd) {
       console.log('用法：node bind.mjs map <openid前缀> <名字>');
       break;
     }
-    const hits = Object.keys(memory.profileTable()).filter((id) => id.startsWith(prefix));
+    const hits = [...readMembers().keys()].filter((id) => id.startsWith(prefix));
     if (hits.length === 0 && prefix.length >= 8) {
       // 允许直接给完整 openid（比如从旧库里捞出来的，profiles 里还没记录）
       saveAlias(prefix, name);
@@ -63,7 +63,7 @@ switch (cmd) {
       break;
     }
     saveAlias(hits[0], name);
-    console.log(`已写入绑定表 ${hits[0]} -> ${name}（机器人 60 秒内自动生效）`);
+    console.log(`已写入绑定表 ${hits[0]} -> ${name}`);
     break;
   }
   case 'unknown': {

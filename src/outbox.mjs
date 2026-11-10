@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { DIRS, MAX_BURST, log, num, appendLine, metric, trace } from './core.mjs';
 import { sendGroup, sendC2C } from './transport.mjs';
-import { renderLines } from './mentions.mjs';
+import { prepareGroupLines } from './mentions.mjs';
 
 const GAP = num('SEND_GAP_MS', 1200);
 const QPM = Math.max(1, num('GROUP_QPM', 20));
@@ -67,10 +67,10 @@ async function drain(key, queue) {
       await waitForWork(queue, Math.min(wait, job.deadline - now));
       continue;
     }
-    const text = job.lines[job.index];
+    const { content, text } = job.lines[job.index];
     const body = job.msgId
-      ? buildBody(text, job.msgId, job.index + 1)
-      : buildBody(text);
+      ? buildBody(content, job.msgId, job.index + 1)
+      : buildBody(content);
     let response;
     try {
       const signal = AbortSignal.timeout(Math.min(8000, job.deadline - now));
@@ -83,7 +83,7 @@ async function drain(key, queue) {
     const code = response.data?.err_code || response.data?.code;
     const status = response.status;
     if (status >= 200 && status < 300 && !code && response.data?.id) {
-      job.results.push({ ok: true, id: response.data.id, index: job.index });
+      job.results.push({ ok: true, id: response.data.id, text, content, sourceId: job.sourceId, turnId: job.turnId });
       metric('send_ok');
       if (job.index === 0 && job.receivedAt) {
         trace({ kind: 'first_reply_delivered', turnId: job.turnId, ms: Date.now() - job.receivedAt });
@@ -137,13 +137,14 @@ function buildBody(text, msgId, seq) {
 }
 
 export function sendLines({
-  scope = 'group', group, openid, lines, msgId, turnId, kind = 'reply',
+  scope = 'group', group, openid, lines, msgId, sourceId = msgId, turnId, kind = 'reply',
   deadline = Date.now() + 60_000, receivedAt, shouldSend,
 }) {
   const key = scope === 'c2c' ? 'c2c:' + openid : group;
   // 群消息把 @名字 换成真实提及 <@openid>，否则只是纯文本
-  const source = scope === 'group' ? renderLines(lines) : lines;
-  const messages = source.filter((line) => typeof line === 'string' && line.trim()).slice(0, MAX_BURST);
+  const source = lines.filter((line) => typeof line === 'string' && line.trim());
+  const messages = (scope === 'group' ? prepareGroupLines(source) : source.map((text) => ({ text, content: text })))
+    .slice(0, MAX_BURST);
   if (!messages.length) return Promise.resolve([]);
   const dedupeKey = msgId ? key + ':' + msgId : turnId;
   const queue = queues.get(key) || { jobs: [], running: false, wake: null };
@@ -153,7 +154,7 @@ export function sendLines({
   queues.set(key, queue);
   return new Promise((resolve) => {
     queue.jobs.push({
-      scope, group, openid, lines: messages, msgId, turnId, kind, deadline, receivedAt, shouldSend,
+      scope, group, openid, lines: messages, msgId, sourceId, turnId, kind, deadline, receivedAt, shouldSend,
       dedupeKey, resolve, index: 0, results: [], attempt: 0, retryAt: 0,
     });
     queue.wake?.();

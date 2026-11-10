@@ -1,5 +1,6 @@
 import { groupConfig, patchGroupConfig, log } from './core.mjs';
 import * as memory from './memory.mjs';
+import { nameOf, readMembers } from './members.mjs';
 import { redeem } from './bindings.mjs';
 import { getSession, setSession, clearSession } from './pipeline.mjs';
 
@@ -38,7 +39,6 @@ define('绑定', {
     if (!arg) return { lines: ['码呢 管理给你那个码 发我'] };
     const r = redeem(arg, uid);
     if (!r.ok) return { lines: [r.reason] };
-    memory.setAlias(uid, r.name);
     if (r.repeat) return { lines: [`你早就是${r.name}了`] };
     return { lines: [`行 ${r.name} 记下了 以后别装别人`] };
   },
@@ -48,12 +48,13 @@ define('战绩', {
   aliases: ['stats', '战况'],
   handler: ({ arg, group }) => {
     const people = memory.memberIds(group);
-    const target = people.find((id) => arg && memory.nameOf(id).includes(arg));
+    const members = readMembers(people);
+    const target = people.find((id) => arg && members.get(id)?.name.includes(arg));
     if (target) {
       const claims = memory.memberClaims(group, target).map((claim) => claim.text);
-      return { lines: claims.length ? claims : [memory.nameOf(target) + ' 在这个群没留过能引用的战绩'] };
+      return { lines: claims.length ? claims : [nameOf(target, '', members) + ' 在这个群没留过能引用的战绩'] };
     }
-    const list = people.slice(-6).map((id) => memory.nameOf(id)).join('、');
+    const list = people.slice(-6).map((id) => nameOf(id, '', members)).join('、');
     return { lines: [list ? `现在认得的：${list}。要查谁？` : '我还没认人，先@我说“我是zrc”这种。'] };
   },
 });

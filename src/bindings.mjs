@@ -1,10 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DIRS, readJson, writeJson, log } from './core.mjs';
-import * as memory from './memory.mjs';
+import { readMembers, saveAlias } from './members.mjs';
 
 const FILE = path.join(DIRS.data, 'bind-codes.json');
-const ALIAS_FILE = path.join(DIRS.data, 'aliases.json');
 
 // 去掉容易看错的 0/O/1/I
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -25,19 +24,6 @@ function genCode(prefix, len = 5) {
     .replace(/[^A-Z]/g, '')
     .slice(0, 3);
   return p ? `${p}-${s}` : s;
-}
-
-/* ---------------- 绑定结果（机器人只读，CLI 写） ---------------- */
-
-export function loadAliases() {
-  return readJson(ALIAS_FILE, {});
-}
-
-export function saveAlias(openid, name) {
-  const a = loadAliases();
-  a[openid] = { name, at: new Date().toISOString() };
-  writeJson(ALIAS_FILE, a);
-  return a[openid];
 }
 
 /** 管理员侧：为某个人生成一次性绑定码 */
@@ -74,7 +60,11 @@ export function redeem(code, openid) {
 
   if (!item) return { ok: false, reason: '这个码我没发过 别瞎试' };
   if (item.usedAt) {
-    if (item.usedBy === openid) return { ok: true, name: item.name, repeat: true };
+    if (item.usedBy === openid) {
+      const member = readMembers([openid]).get(openid);
+      const name = member?.verified ? member.name : saveAlias(openid, item.name).name;
+      return { ok: true, name, repeat: true };
+    }
     return { ok: false, reason: '这码被人用过了' };
   }
   if (Date.parse(item.expireAt) < Date.now()) return { ok: false, reason: '码过期了 让管理重发' };
@@ -105,17 +95,10 @@ export function revoke(code) {
 }
 
 /** 当前已认出来的人（openid 是平台 id，无法反查 QQ 号） */
-const REAL_OPENID = /^[0-9A-F]{32}$/;   // 平台 openid 是 32 位大写十六进制，挡掉测试假 id
-
 export function boundPeople() {
-  const out = new Map();
-  for (const [openid, p] of Object.entries(memory.profileTable())) {
-    if (p.bound && p.name && REAL_OPENID.test(openid)) out.set(openid, p.name);
-  }
-  for (const [openid, v] of Object.entries(loadAliases())) {
-    if (v?.name && REAL_OPENID.test(openid)) out.set(openid, v.name);
-  }
-  return [...out.entries()].map(([openid, name]) => ({ openid, name }));
+  return [...readMembers().values()]
+    .filter((member) => member.platformId && member.bound && member.name)
+    .map(({ openid, name }) => ({ openid, name }));
 }
 
 
@@ -166,14 +149,13 @@ function* allRecords() {
 
 /** 还没绑定的发言人，按最近发言排序，带第一句话方便认人 */
 export function unknownSpeakers({ limit = 20 } = {}) {
-  const bound = memory.profileTable();
-  const aliases = loadAliases();
+  const members = readMembers();
   const map = new Map();
 
   for (const r of allRecords()) {
     const uid = r.u;
     if (!uid || r.self) continue;
-    if (bound[uid]?.bound || aliases[uid]) continue;
+    if (members.get(uid)?.bound) continue;
 
     const text = String(r.c || '').trim();
     const cur = map.get(uid);

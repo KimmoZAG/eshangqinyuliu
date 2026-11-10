@@ -113,6 +113,7 @@ export async function callTool(name, args, { signal, allowed, key: conversation 
 /* ---------------- 内置工具 ---------------- */
 
 import * as memory from './memory.mjs';
+import { readMembers, usedAngles } from './members.mjs';
 
 register('recall_memory', {
   domain: 'internal',
@@ -123,15 +124,15 @@ register('recall_memory', {
 
 register('member_profile', {
   domain: 'internal',
-  description: '查询某个群友的画像：短板、梗、最近被锐评过的角度',
+  description: '查询当前会话里某个群友的称呼和最近被锐评过的角度',
   schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
   call: ({ name }, { key }) => {
-    const id = key && memory.memberIds(key).find((id) => memory.nameOf(id).includes(name));
-    if (!id) return { found: false };
+    const member = key && [...readMembers(memory.memberIds(key)).values()].find((item) => item.name && item.name.includes(name));
+    if (!member) return { found: false };
     return {
       found: true,
-      name: memory.nameOf(id),
-      usedAngles: memory.usedAngles(key, id),
+      name: member.name,
+      usedAngles: usedAngles(key, member.openid),
     };
   },
 });

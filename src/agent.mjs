@@ -1,6 +1,8 @@
 import { trace } from './core.mjs';
 import { chat, splitReplies } from '../llm.mjs';
 import * as memory from './memory.mjs';
+import { readMembers } from './members.mjs';
+import { formatDialogue } from './context.mjs';
 import { callTool, toolsByDomain } from './tools.mjs';
 import { publicContent, sanitizeLines, systemPrompt } from './reply.mjs';
 
@@ -57,7 +59,9 @@ async function gatherMaterial() {
 }
 
 export async function buildTopic({ group, cfg }) {
-  const ctx = memory.buildContext(group, { limit: 30 });
+  const snapshot = memory.readContext(group, { limit: 30 });
+  const members = readMembers(snapshot.participants);
+  const ctx = formatDialogue(snapshot, members);
   const parts = cfg.features.tools ? await gatherMaterial() : [];
 
   const material = parts.length ? parts.map((p) => `[${p.tag}]\n${p.text}`).join('\n\n') : '';
@@ -69,7 +73,7 @@ export async function buildTopic({ group, cfg }) {
 
   const user = `群里最近的聊天：\n${ctx}\n\n${basis}\n\n现在没人说话，你主动抛一个话题，1-2 行，每行不超过 40 字，不@任何人，别说教、别像播报。如果上面有具体数据，至少点出一个队名或一个数字，别只说“没想到”。`;
 
-  const out = await chat([{ role: 'system', content: systemPrompt(group, { scene: 'topic' }) }, { role: 'user', content: user }], {
+  const out = await chat([{ role: 'system', content: systemPrompt(members, { scene: 'topic' }) }, { role: 'user', content: user }], {
     effort: 'none',
     maxTokens: 300,
   }).catch(() => '');

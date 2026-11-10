@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { DIRS, dayKey, hhmm, readJson, writeJson, appendLine, readLines, uid } from './core.mjs';
+import { DIRS, dayKey, appendLine, readLines, uid } from './core.mjs';
+import { observeMember } from './members.mjs';
 
 const MAX_WORKING = 300;
 
@@ -21,10 +22,11 @@ export function loadWorking(key) {
 }
 
 /** 记录机器人自己发出去的话，避免复读自己 */
-export function addSelf(key, text, { id, sourceId } = {}) {
+export function addSelf(key, text, { id, sourceId, turnId } = {}) {
   const row = {
     id: id || 'self:' + uid(),
     sourceId,
+    turnId,
     ts: new Date().toISOString(),
     u: '',
     n: '你',
@@ -61,7 +63,7 @@ export function addMessage(key, rec) {
   arr.push(row);
   if (arr.length > MAX_WORKING) arr.splice(0, arr.length - MAX_WORKING);
   appendLine(wfile(key), row);
-  if (row.u) touchProfile(row.u, rec.rawName);
+  if (row.u) observeMember(row.u, rec.rawName);
   return true;
 }
 
@@ -75,67 +77,6 @@ export function memberIds(key) {
 
 export function dayMessages(key, day) {
   return readLines(wfile(key, day));
-}
-
-/* ---------------- profiles：人物画像 ---------------- */
-
-const PROFILES_FILE = path.join(DIRS.data, 'profiles.json');
-let profiles = readJson(PROFILES_FILE, {});
-
-const saveProfiles = () => writeJson(PROFILES_FILE, profiles);
-
-function touchProfile(id, rawName) {
-  const p = profile(id);
-  const changedName = !p.name && rawName;
-  if (changedName) p.name = rawName;
-  if (!changedName && Date.now() - Date.parse(p.lastSeen) < 5 * 60_000) return;
-  p.lastSeen = new Date().toISOString();
-  saveProfiles();
-}
-
-export function profile(id) {
-  if (!profiles[id]) {
-    profiles[id] = { name: '', angles: {}, bits: [], weaknesses: [], lastSeen: null };
-  }
-  return profiles[id];
-}
-
-export function setAlias(id, name, { verified = true } = {}) {
-  const p = profile(id);
-  if (p.verified && !verified) return p.name;
-  p.name = name;
-  p.bound = true;
-  p.verified = verified;
-  p.boundAt = new Date().toISOString();
-  saveProfiles();
-  return p.name;
-}
-
-export function isVerified(id, name) {
-  return !!profiles[id]?.verified && profiles[id].name === name;
-}
-
-export function nameOf(id, fallback) {
-  return profiles[id]?.name || fallback || '群友';
-}
-
-export function markAngle(key, id, angle) {
-  const p = profile(id);
-  p.angleByConversation ??= {};
-  const scope = p.angleByConversation[key] || {};
-  p.angleByConversation[key] = { ...scope, [angle]: Date.now() };
-  saveProfiles();
-}
-
-export function usedAngles(key, id, withinMs = 6 * 3600 * 1000) {
-  const cutoff = Date.now() - withinMs;
-  return Object.entries(profiles[id]?.angleByConversation?.[key] || {})
-    .filter(([, ts]) => ts > cutoff)
-    .map(([a]) => a);
-}
-
-export function profileTable() {
-  return profiles;
 }
 
 /* ---------------- episodes：事件卡 ---------------- */
@@ -185,28 +126,12 @@ export function memberClaims(key, id, limit = 3) {
 
 /* ---------------- 上下文组装 ---------------- */
 
-export function buildContext(key, { limit = 40, query = '', memberIds = [], excludeId } = {}) {
+export function readContext(key, { limit = 40, query = '', excludeId } = {}) {
   const working = loadWorking(key);
   const current = excludeId ? working.findIndex((message) => message.id === excludeId) : -1;
-  const rows = current < 0 ? working.slice(-limit) : working.slice(Math.max(0, current - limit), current);
-  const lines = rows.length
-    ? rows.map((m) => `${hhmm(m.ts)} ${m.self ? '你（金桦）' : m.n}：${m.c?.slice(0, 360) || '（发了东西）'}${m.att?.length ? ` [${m.att.map((a) => a.t).join(',')}]` : ''}`).join('\n')
-    : '（今天还没有聊天记录）';
-
-  const eps = searchEpisodes(key, query || rows.slice(-3).map((r) => r.c).join(' '), 4, excludeId);
-  const epText = eps.length ? eps.map((e) => `· ${e.text}`).join('\n') : '';
-
-  const people = [...new Set([...memberIds, ...rows.slice(-8).map((r) => r.u)])]
-    .filter(Boolean)
-    .slice(0, 4)
-    .map((id) => '· ' + nameOf(id))
-    .join('\n');
-
-  return [
-    `【当前会话（最近${rows.length}条）】\n${lines}`,
-    epText ? `【可能相关的旧事】\n${epText}` : '',
-    people ? `【在场的人】\n${people}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+  const before = current < 0 ? working : working.slice(0, current);
+  const messages = before.slice(-limit);
+  const episodes = searchEpisodes(key, query || messages.slice(-3).map((row) => row.c).join(' '), 4, excludeId);
+  const participants = [...new Set(before.map((row) => row.u).filter(Boolean))];
+  return { messages, episodes, participants };
 }

@@ -1,8 +1,7 @@
 import path from 'node:path';
 import { DIRS, log, num, readJson, writeJson, trace, metric, groupConfig } from './core.mjs';
 import { buildTopic } from './agent.mjs';
-import { sendLines } from './outbox.mjs';
-import * as memory from './memory.mjs';
+import { deliver } from './delivery.mjs';
 
 const CYCLE_H = num('TOPIC_CYCLE_H', 6);
 const FILE = path.join(DIRS.data, 'jobs.json');
@@ -61,7 +60,7 @@ export function jobTable() {
 }
 
 /** 执行一次话题（供定时与 /话题 命令共用） */
-export async function runTopic(group, { manual = false } = {}) {
+export async function runTopic(group, { manual = false, sourceId } = {}) {
   const cfg = groupConfig(group);
   const job = ensure(group);
 
@@ -75,16 +74,16 @@ export async function runTopic(group, { manual = false } = {}) {
     let lines = await buildTopic({ group, cfg });
     if (!lines.length) lines = ['今晚谁开黑？LOL还是CS，先说好谁菜。'];
 
-    const r = await sendLines({
+    const delivered = await deliver({
       scope: 'group',
       group,
       lines,
       kind: 'proactive',
+      sourceId,
       turnId: `topic:${job.cycleId}`,
     });
 
-    const ok = r.some((x) => x.ok);
-    for (const sent of r) if (sent.ok) memory.addSelf(group, lines[sent.index], { id: sent.id });
+    const ok = delivered.length > 0;
     trace({ kind: 'topic', group, manual, ok, lines: lines.length, cycle: job.cycleId });
     metric(ok ? 'topic_ok' : 'topic_fail');
 

@@ -19,8 +19,11 @@ src/
   core.mjs             配置 / 日志 / trace / metrics
   transport.mjs        QQ 协议：WS 生命周期 + 事件归一化 + 发送
   outbox.mjs           发送队列与限流
+  delivery.mjs         统一处理送达回执和记忆回写
   pipeline.mjs         去重 / 限流 / 会话 / 插话冷却
-  memory.mjs           working + profiles + episodes + 检索
+  memory.mjs           近期消息、事件卡与检索
+  members.mjs          成员称呼、验证身份与互动状态
+  context.mjs          按规划和成稿阶段组装上下文
   plugins.mjs          命令插件
   tools.mjs            工具注册 + MCP 客户端
   opgg.mjs             OP.GG 数据工具
@@ -61,6 +64,8 @@ sh run.sh                # 守护启动，崩溃 3 秒自动拉起
 `config/mcp.json` 的 HLTV 和 LoL 进程路径来自原部署环境。换机器时需按本机安装位置调整。stdio 服务握手失败时，能直连的适配器仍可加载。
 
 旧事件卡如果缺少会话或消息来源，会保留原文件并退出检索。群内专属语气使用口令或 CLI 确认的身份，自报昵称仍可用于称呼。
+
+成员目录优先读取 `data/aliases.json` 的绑定结果，`data/profiles.json` 保存观察到的昵称与互动状态，并兼容旧的已验证记录。真实 @ 使用已验证且符合平台格式的 OpenID。记忆检索返回消息和事件记录，由回复阶段选择需要带进模型的内容。
 
 ## 离线回放
 

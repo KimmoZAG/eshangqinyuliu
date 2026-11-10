@@ -2,6 +2,8 @@ import { chat, splitReplies } from '../llm.mjs';
 import { ALIASES, buildSystemPrompt } from '../persona.mjs';
 import { groupConfig, MAX_BURST, nowText, num, trace } from './core.mjs';
 import * as memory from './memory.mjs';
+import { readMembers, nameOf, markAngle, usedAngles } from './members.mjs';
+import { formatDialogue, planningContext } from './context.mjs';
 import { needsSemanticSplit, parseReplyMode, questionsOf } from './questions.mjs';
 import { parseObject, researchQuestions, splitAmbiguous } from './research.mjs';
 
@@ -30,17 +32,17 @@ export function publicContent(output) {
   return /<\/?(think|analysis|tool_call)\b/i.test(text) ? '' : text;
 }
 
-export function systemPrompt(key, options = {}) {
-  const members = memory.memberIds(key).slice(-12).map((id) => memory.nameOf(id));
-  return buildSystemPrompt({ botName: BOT_NAME, members, now: nowText(), ...options });
+export function systemPrompt(members, options = {}) {
+  const names = [...members.keys()].slice(-12).map((id) => nameOf(id, '', members));
+  return buildSystemPrompt({ botName: BOT_NAME, members: names, now: nowText(), ...options });
 }
 
-function getAngle(key, text) {
+function getAngle(key, text, members) {
   const alias = Object.entries(ALIASES).find(([abbr, name]) => text.toLowerCase().includes(abbr) || text.includes(name));
-  const id = alias && memory.memberIds(key).find((id) => memory.nameOf(id) === alias[1]);
-  if (!id) return null;
-  const used = memory.usedAngles(key, id);
-  const name = alias[1];
+  const member = alias && [...members.values()].find((person) => person.verified && person.name === alias[1]);
+  if (!member) return null;
+  const { openid: id, name } = member;
+  const used = usedAngles(key, id);
   const angle = ANGLES[name]?.find((angle) => !used.includes(angle));
   return angle ? { id, name, angle } : null;
 }
@@ -191,8 +193,9 @@ export async function composeReply({
     const remaining = end - Date.now();
     return remaining > 0 ? AbortSignal.timeout(remaining) : AbortSignal.abort();
   };
-  const context = memory.buildContext(key, { limit: 12, query: message, memberIds: [uid], excludeId: messageId });
-  const angle = getAngle(key, message);
+  const snapshot = memory.readContext(key, { limit: 12, query: message, excludeId: messageId });
+  const members = readMembers([...snapshot.participants, uid]);
+  const angle = getAngle(key, message, members);
   const researchEnd = workEnd - reserve;
   const researchSignal = makeSignal(researchEnd);
   let questions = questionsOf(message);
@@ -214,10 +217,13 @@ export async function composeReply({
   const hasLookup = active.some((q) => q.lookup);
   const structured = hasLookup || active.length > 1 || deferred > 0;
   const [items, image] = await Promise.all([
-    researchQuestions(active, { cfg, context, text: message, signal: researchSignal, takeEffort, turnId, fast: mode === 'fast' }),
+    researchQuestions(active, {
+      cfg, context: planningContext(snapshot), text: message, signal: researchSignal, takeEffort, turnId, fast: mode === 'fast',
+    }),
     imageUrl && Date.now() < researchEnd ? fetchImage(imageUrl, researchSignal) : null,
   ]);
-  const relationship = uid && memory.isVerified(uid, ALIASES.zrc);
+  const member = members.get(uid);
+  const relationship = member?.verified && member.name === ALIASES.zrc;
   const scene = SUPPORT.test(message) ? 'support' : structured && hasLookup ? 'facts'
     : interject ? 'interject' : relationship ? 'close' : 'chat';
   const available = !structured || items.some((item) => item.status === 'chat' || item.status === 'evidence');
@@ -225,12 +231,13 @@ export async function composeReply({
   let error;
   if (Date.now() < workEnd && available) {
     const prompt = {
-      context, speaker, message, interject, angle: angle && { who: angle.name, topic: angle.angle },
+      context: formatDialogue(snapshot, members, uid),
+      speaker, message, interject, angle: angle && { who: angle.name, topic: angle.angle },
       shortReaction: FILLER.test(message), image: image ? '可见' : imageHint ? '没取到图，别猜' : undefined,
       questions: structured ? items.map(({ id, text, status, evidence }) => ({ id, text, status, evidence })) : undefined,
     };
     const stage = structured ? '[answer-by-id] ' : '[chat-reply] ';
-    const messages = [{ role: 'system', content: stage + systemPrompt(key, { scene, structured, relationship }) }];
+    const messages = [{ role: 'system', content: stage + systemPrompt(members, { scene, structured, relationship }) }];
     const payload = JSON.stringify(prompt);
     messages.push({
       role: 'user', content: image
@@ -286,7 +293,8 @@ export async function composeReply({
 
 export async function decideInterject({ key, uid, speaker, text, cfg, messageId, signal }) {
   if (Math.random() >= cfg.interjectP) return { speak: false, reason: 'sampled_out' };
-  const context = memory.buildContext(key, { limit: 8, query: text, memberIds: [uid], excludeId: messageId });
+  const snapshot = memory.readContext(key, { limit: 8, query: text, excludeId: messageId });
+  const context = formatDialogue(snapshot, readMembers([...snapshot.participants, uid]), uid);
   try {
     const output = await chat([
       { role: 'system', content: '[interject] 判断金桦有没有值得接的一句。只输出 JSON {"speak":true,"tone":"损|茶|护|正经","target":"要接话的人或空字符串"}。' },
@@ -308,6 +316,6 @@ export function rememberClaim({ key, uid, speaker, text, messageId }) {
 }
 
 export function reflect({ key, text, replyLines }) {
-  const angle = getAngle(key, text);
-  if (angle && replyLines.some((line) => line.includes(angle.angle))) memory.markAngle(key, angle.id, angle.angle);
+  const angle = getAngle(key, text, readMembers(memory.memberIds(key)));
+  if (angle && replyLines.some((line) => line.includes(angle.angle))) markAngle(key, angle.id, angle.angle);
 }

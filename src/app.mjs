@@ -1,4 +1,4 @@
-import { log, groupConfig, trace, metric, num, uid as newId } from './core.mjs';
+import { log, groupConfig, patchGroupConfig, trace, metric, num, uid as newId } from './core.mjs';
 import { startTransport, stripAt, botOpenid, botNames, groupState, forgetGroup } from './transport.mjs';
 import * as pipeline from './pipeline.mjs';
 import * as memory from './memory.mjs';
@@ -91,6 +91,20 @@ async function onGroupMessage(evt, receivedAt) {
   }
 
   const ctx = { group, uid, sessionKey: group + ':' + uid, role: author.member_role || 'member', cfg, speaker };
+
+  // 张睿诚说闭嘴/说话，直接执行（服从的具体落点）
+  if (speaker === '张睿诚') {
+    if (/^(闭嘴|安静|别说了|别说话)/.test(text)) {
+      patchGroupConfig(group, { features: { interject: false } });
+      await sendLines({ scope: 'group', group, lines: ['行 我闭嘴'], msgId: isAt ? d.id : undefined, kind: isAt ? 'reply' : 'proactive', turnId: `${group}:${d.id}` });
+      return;
+    }
+    if (/^(说话|别憋着|继续)/.test(text)) {
+      patchGroupConfig(group, { features: { interject: true } });
+      await sendLines({ scope: 'group', group, lines: ['那我可就不客气了'], msgId: isAt ? d.id : undefined, kind: isAt ? 'reply' : 'proactive', turnId: `${group}:${d.id}` });
+      return;
+    }
+  }
 
   // 1) 命令
   const cmd = commandOf(text);

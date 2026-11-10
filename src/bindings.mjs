@@ -105,13 +105,15 @@ export function revoke(code) {
 }
 
 /** 当前已认出来的人（openid 是平台 id，无法反查 QQ 号） */
+const REAL_OPENID = /^[0-9A-F]{32}$/;   // 平台 openid 是 32 位大写十六进制，挡掉测试假 id
+
 export function boundPeople() {
   const out = new Map();
   for (const [openid, p] of Object.entries(memory.profileTable())) {
-    if (p.bound && p.name) out.set(openid, p.name);
+    if (p.bound && p.name && REAL_OPENID.test(openid)) out.set(openid, p.name);
   }
   for (const [openid, v] of Object.entries(loadAliases())) {
-    if (v?.name) out.set(openid, v.name);
+    if (v?.name && REAL_OPENID.test(openid)) out.set(openid, v.name);
   }
   return [...out.entries()].map(([openid, name]) => ({ openid, name }));
 }

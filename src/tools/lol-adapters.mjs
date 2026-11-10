@@ -175,6 +175,57 @@ export default function registerLolAdapters(register, client) {
   });
 
 
+
+  register('lol_tournament', {
+    domain: 'lol',
+    description:
+      '查整个赛事（如 S 赛/Worlds）的整体安排：各阶段名称、起止时间、场次数，以及决赛时间。问“S赛什么安排/总共几场/决赛什么时候”用这个。',
+    schema: {
+      type: 'object',
+      properties: {
+        league: { type: 'string', description: '赛事关键词，默认 Worlds' },
+      },
+    },
+    ttlMs: 600_000,
+    call: async ({ league = 'Worlds' } = {}) => {
+      const j = await gw('getSchedule', { hl: 'zh-CN' });
+      const events = (j?.data?.schedule?.events || []).filter((e) => e?.match?.id);
+      const key = String(league || '').toLowerCase();
+      const mine = events.filter(
+        (e) => String(e.league?.name || '').toLowerCase().includes(key) || String(e.league?.slug || '').toLowerCase().includes(key),
+      );
+      if (!mine.length) throw Object.assign(new Error(`没查到 ${league} 的赛程`), { code: 'not_found' });
+
+      const stages = new Map();
+      for (const e of mine) {
+        const name = e.blockName || '未分阶段';
+        const cur = stages.get(name) || { stage: name, from: e.startTime, to: e.startTime, matches: 0, done: 0 };
+        cur.matches += 1;
+        if (e.state === 'completed') cur.done += 1;
+        if (Date.parse(e.startTime) < Date.parse(cur.from)) cur.from = e.startTime;
+        if (Date.parse(e.startTime) > Date.parse(cur.to)) cur.to = e.startTime;
+        stages.set(name, cur);
+      }
+
+      const finalEvent = mine.find((e) => String(e.blockName || '').trim() === '决赛');
+      return {
+        league,
+        total_matches: mine.length,
+        stages: [...stages.values()]
+          .sort((a, b) => Date.parse(a.from) - Date.parse(b.from))
+          .map((x) => ({ stage: x.stage, from: shText(x.from), to: shText(x.to), matches: x.matches, completed: x.done })),
+        final: finalEvent
+          ? {
+              start_time: shText(finalEvent.startTime),
+              state: finalEvent.state,
+              teams: (finalEvent.match?.teams || []).map((t) => t.name),
+            }
+          : null,
+        note: '时间是北京时间。赛程数据里没有开场演出、转播安排这类信息，问这些要另外搜。',
+      };
+    },
+  });
+
   register('lol_recent_results', {
     domain: 'lol',
     description:

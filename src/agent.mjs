@@ -346,7 +346,10 @@ const BASE_PROTOCOL = `
 1. 只报工具返回里真实存在的数字和名称，一个都不许编、不许换算、不许写"大概"。
 2. 工具返回错误或查不到，就直接说没查到，不许用你的常识补。
 3. 不许说"我给你查查"然后不调工具就结束；要数据就必须先调工具。
-4. 这是群聊，回答短，最多 3 行。`;
+4. 这是群聊，回答短，最多 3 行。
+5. 对方一条消息里问了多件事，就逐个回答（最多 3 件），不许只挑一件答。
+6. 数据类问题（赛程/比分/排名）用赛事工具；赛事工具查不到的（开场演出、转播平台、门票、选手八卦）用 web_search。
+7. 某一部分查不到就明确说“这个我没查到”，不许装作没看见。`;
 
 const DOMAIN_PROTOCOL = {
   opgg: `
@@ -372,7 +375,9 @@ const DOMAIN_PROTOCOL = {
 - get-live-matches / get-live-match-score 只回答「现在正在打什么」，不能用来回答「今天有没有比赛」。
 - 查某场比分详情或 VOD → 先 lol_resolve_event 拿 event_id，再 lol_event_details / lol_event_vods。
 - 这个时间段没有比赛就直接说「今天没有比赛」，不要用「没直播」敷衍，也不许编赛果。
-- 时间统一说北京时间（UTC+8）。`,
+- 时间统一说北京时间（UTC+8）。
+- 问整个赛事安排（S赛几号到几号、几个阶段、决赛哪天）→ lol_tournament。
+- 开场演出、转播平台、门票这类赛程数据里没有的 → web_search，别硬编。`,
   search: `
 【搜索专用】
 - 只报搜索结果里出现的事实和数字，别用自己的记忆补。
@@ -387,7 +392,10 @@ const DOMAIN_PROTOCOL = {
 };
 
 export async function planAndCompose({ key, speaker, uid, text, domain }) {
-  const tools = toolsByDomain(domain).filter((t) => !['recall_memory', 'member_profile'].includes(t.name));
+  const own = toolsByDomain(domain).filter((t) => !['recall_memory', 'member_profile'].includes(t.name));
+  // 任何域都带一个通用搜索：赛程+开场演出、数据+新闻 这种混问才有解
+  const extra = toolsByDomain('search').filter((t) => !own.some((o) => o.name === t.name));
+  const tools = [...own, ...extra];
   if (!tools.length) return null;
 
   const catalog = tools.map((t) => ({ name: t.name, description: t.description, schema: t.schema }));
@@ -429,6 +437,17 @@ export async function planAndCompose({ key, speaker, uid, text, domain }) {
     }
 
     if (plan.final) {
+      // 说了“我搜一下/我查查”却没调工具 → 逼它真去调一次
+      const promise = /我(搜|查|看)一下|稍等|马上|我确认一下/.test(plan.final) && i === 0;
+      if (promise) {
+        trace({ kind: 'plan_promise_without_tool', key });
+        messages.push({ role: 'assistant', content: JSON.stringify({ final: plan.final }) });
+        messages.push({
+          role: 'user',
+          content: '你说了要搜/查，但还没调工具。现在就输出 {"tool":"web_search","args":{"query":"..."}}，不要只说话。',
+        });
+        continue;
+      }
       trace({ kind: 'plan_final', key, steps: i });
       return sanitizeLines(splitReplies(plan.final, 5));
     }

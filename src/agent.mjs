@@ -266,7 +266,7 @@ export async function decideInterject({ key, uid, speaker, text, cfg }) {
 const RULES = {
   hltv: [
     [/(cs2|csgo|counter[- ]?strike|反恐精英|hltv)/i, 6],
-    [/(^|[\s的])cs(战队|队|圈|比赛|选手|排名|第一)?/i, 4],
+    [/(cs\s*(战队|队|圈|比赛|选手)|(^|[^a-z])cs(?![a-z]))/i, 4],
     [/(major|blast|iem|katowice|rating)/i, 3],
     [/(战队|世界第|排名|第一|最强|选手)/, 1],
   ],
@@ -277,8 +277,14 @@ const RULES = {
   ],
   steam: [
     [/(steam|蒸汽平台)/i, 6],
-    [/(多少钱|价格|打折|折扣|好评|评价|在线人数|销量|发售|新游|dlc|单机|入库)/i, 3],
+    [/(多少钱|价格|打折|折扣|好评|评价|在线人数|发售|新游|dlc|单机|入库)/i, 3],
     [/(游戏|好玩)/, 1],
+  ],
+  search: [
+    [/(新闻|热搜|发生了什么|真的假的|是不是真的|最新消息|发布会|传闻|官宣)/, 5],
+    [/(销量|同比|环比|产量|统计局|数据)/, 2],
+    [/(怎么看|怎么评价|靠谱吗|可信吗|真的吗)/, 3],
+    [/(为什么|怎么回事|什么情况)/, 1],
   ],
   opgg: [
     [/(韩服|op\.?gg)/i, 6],
@@ -314,13 +320,13 @@ export async function pickDomain(text) {
   try {
     const out = await chat(
       [
-        { role: 'system', content: '只输出一个词：steam / hltv / lol / opgg / none。判断这句话要查哪类数据，不确定就 none。' },
+        { role: 'system', content: '只输出一个词：search / steam / hltv / lol / opgg / none。判断这句话要查哪类数据（新闻时事→search），不确定就 none。' },
         { role: 'user', content: s.slice(0, 120) },
       ],
       { effort: 'none', maxTokens: 8 },
     );
     const d = String(out).trim().toLowerCase().replace(/[^a-z]/g, '');
-    return ['steam', 'hltv', 'lol', 'opgg'].includes(d) && toolsByDomain(d).length ? d : null;
+    return ['search', 'steam', 'hltv', 'lol', 'opgg'].includes(d) && toolsByDomain(d).length ? d : null;
   } catch {
     return null;
   }
@@ -367,6 +373,12 @@ const DOMAIN_PROTOCOL = {
 - 查某场比分详情或 VOD → 先 lol_resolve_event 拿 event_id，再 lol_event_details / lol_event_vods。
 - 这个时间段没有比赛就直接说「今天没有比赛」，不要用「没直播」敷衍，也不许编赛果。
 - 时间统一说北京时间（UTC+8）。`,
+  search: `
+【搜索专用】
+- 只报搜索结果里出现的事实和数字，别用自己的记忆补。
+- 说来源用“网上说 / 刚看到”，不要编媒体名字。
+- 搜不到就说没搜到，不要硬答，也不要一句“我不懂”打发。
+- 时政、选举、政治类话题不参与，直接岔开（“这我不聊 说点游戏”）。`,
   hltv: `
 【HLTV 专用】
 - Rating 保留工具给的原值，不要四舍五入成"很高"。

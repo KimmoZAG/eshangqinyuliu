@@ -1,5 +1,14 @@
 [
   {
+    "name": "search",
+    "domain": "search",
+    "enabled": true,
+    "transport": "none",
+    "adapters": [
+      "./src/tools/search-adapters.mjs"
+    ]
+  },
+  {
     "name": "steam",
     "domain": "steam",
     "enabled": true,

@@ -116,8 +116,24 @@ export async function startMcpServers() {
   let okServers = 0;
   for (const cfg of servers) {
     if (cfg.enabled === false) continue;
+    // transport=none：只有适配器，没有 MCP 子进程（比如直连 HTTP API 的搜索）
+    if ((cfg.transport || 'stdio') === 'none') {
+      for (const rel of cfg.adapters || []) {
+        try {
+          const mod = await import(new URL(rel, `file://${process.cwd()}/`).href);
+          const fn = mod.default || mod.registerAdapters;
+          if (typeof fn === 'function') fn(register, null, cfg);
+        } catch (e) {
+          log('mcp', `${cfg.name} 适配器加载失败 ${rel}：${e.message}`);
+        }
+      }
+      okServers += 1;
+      log('mcp', `${cfg.name} 无进程适配器已加载`);
+      continue;
+    }
+
     if ((cfg.transport || 'stdio') !== 'stdio') {
-      log('mcp', `${cfg.name} 跳过：transport=${cfg.transport}（目前只支持 stdio）`);
+      log('mcp', `${cfg.name} 跳过：transport=${cfg.transport}`);
       continue;
     }
 

@@ -182,7 +182,11 @@ export async function composeReply({ key, speaker, uid, text, imageUrl, imageHin
     : '';
   const questions = splitQuestions(text);
   const effLimit = Math.max(Math.min(limit, 5), questions.length);
-  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(effLimit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}${saidHint}${nameHint}${lowInfo}${coverageNote(questions)}`;
+  const isZrc = /张睿诚/.test(speaker) || /张睿诚/.test(memory.nameOf(uid, ''));
+  const zrcHint = isZrc
+    ? '\n他是张睿诚。对他语气软一档，可以顺口关心、假装吃醋或回撩一句，但一条里最多软一次，不腻。'
+    : '';
+  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(effLimit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}${saidHint}${nameHint}${lowInfo}${zrcHint}${coverageNote(questions)}`;
 
   const messages = [{ role: 'system', content: systemPrompt() }];
   const img = imageUrl ? await fetchImage(imageUrl) : null;

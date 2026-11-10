@@ -69,8 +69,8 @@ async function drain(key, queue) {
     }
     const text = job.lines[job.index];
     const body = job.msgId
-      ? { msg_type: 0, content: text, msg_id: job.msgId, msg_seq: job.index + 1 }
-      : { msg_type: 0, content: text };
+      ? buildBody(text, job.msgId, job.index + 1)
+      : buildBody(text);
     let response;
     try {
       const signal = AbortSignal.timeout(Math.min(8000, job.deadline - now));
@@ -120,6 +120,20 @@ async function runQueue(key, queue) {
     if (queue.jobs.length) void runQueue(key, queue);
     else queues.delete(key);
   }
+}
+
+
+/** 带 <qqbot-at-user> 的必须走 markdown（文本消息里的 @ 不生效） */
+function buildBody(text, msgId, seq) {
+  const mention = /<qqbot-at-(user|everyone)\b/.test(text);
+  const base = mention
+    ? { msg_type: 2, markdown: { content: text } }
+    : { msg_type: 0, content: text };
+  if (msgId) {
+    base.msg_id = msgId;
+    base.msg_seq = seq;
+  }
+  return base;
 }
 
 export function sendLines({

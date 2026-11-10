@@ -47,7 +47,7 @@ export function renderMentions(text) {
   for (const key of keys) {
     const re = new RegExp(`@${esc(key)}(?![\\u4e00-\\u9fa5A-Za-z0-9])`, 'gi');
     // 用函数替换，避免 openid 里的 $ 被当成替换模式
-    out = out.replace(re, () => `<@${map.get(key)}>`);
+    out = out.replace(re, () => `<qqbot-at-user id="${map.get(key)}" />`);
   }
   return out.replace(/[ \t]{2,}/g, ' ').replace(/\s+$/, '');
 }

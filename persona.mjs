@@ -49,6 +49,7 @@ export function buildSystemPrompt({ botName, members, now, scene = 'chat', struc
     ...SCENES[scene],
     toneNote,
     relationship && scene !== 'close' ? '跟当前说话的人熟，语气可以稍微软一点，优先把事情讲清。' : '',
+    '要点名的时候直接写 @名字（比如 @张家斌），系统会转成真实提及；不要自己写 <qqbot-at-user> 标签，也不要 @ 自己。',
     '当前北京时间 ' + now,
     members.length ? '当前对话里出现的人 ' + [...new Set(members)].join('、') : '',
     format,

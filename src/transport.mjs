@@ -64,7 +64,7 @@ export function normalize(p) {
 
 /** 去掉 <@openid> / <@all> */
 export function stripAt(text) {
-  return (text || '').replace(/<@!?[0-9A-Za-z_-]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  return (text || '').replace(/<@!?[0-9A-Za-z_-]+>/g, ' ').replace(/[^\S\r\n]+/g, ' ').trim();
 }
 
 export async function botOpenid(group) {
@@ -76,7 +76,7 @@ export async function botOpenid(group) {
 }
 
 export function botNames() {
-  return [botUser?.username, process.env.BOT_NAME].filter(Boolean);
+  return [...new Set([botUser?.username, process.env.BOT_NAME || '金桦'].filter(Boolean))];
 }
 
 export function forgetGroup(group) {
@@ -89,16 +89,12 @@ export async function groupState(group) {
 
 /* ---------------- 发送 ---------------- */
 
-export async function sendGroup(group, body) {
-  const r = await api('POST', `/v2/groups/${group}/messages`, body);
-  metric(r.data?.err_code ? 'send_fail' : 'send_ok');
-  return r;
+export async function sendGroup(group, body, signal) {
+  return api('POST', `/v2/groups/${group}/messages`, body, { signal });
 }
 
-export async function sendC2C(openid, body) {
-  const r = await api('POST', `/v2/users/${openid}/messages`, body);
-  metric(r.data?.err_code ? 'send_fail' : 'send_ok');
-  return r;
+export async function sendC2C(openid, body, signal) {
+  return api('POST', `/v2/users/${openid}/messages`, body, { signal });
 }
 
 /* ---------------- WebSocket ---------------- */

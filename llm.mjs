@@ -10,10 +10,16 @@ function assertConfig() {
  * 单次调用，带超时。默认关闭思考（reasoning_effort=none），
  * deepseek-flash 默认 high 会把 token 全烧在 reasoning 上导致 content 为空。
  */
-export async function chat(messages, { effort = 'none', maxTokens = 500, timeoutMs = 25_000 } = {}) {
+export async function chat(messages, {
+  effort = 'none', maxTokens = 500, timeoutMs = 25_000, signal, temperature = 1,
+} = {}) {
   assertConfig();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const reasoningStyle = process.env.LLM_REASONING_STYLE || 'effort';
+  const reasoning = reasoningStyle === 'thinking'
+    ? { thinking: { type: effort === 'none' ? 'disabled' : 'enabled' } }
+    : reasoningStyle === 'effort' ? { reasoning_effort: effort } : {};
 
   try {
     const r = await fetch(`${BASE}/chat/completions`, {
@@ -23,16 +29,20 @@ export async function chat(messages, { effort = 'none', maxTokens = 500, timeout
         model: MODEL,
         messages,
         max_tokens: maxTokens,
-        temperature: 1.0,
-        reasoning_effort: effort,
+        temperature,
+        ...reasoning,
       }),
-      signal: ctrl.signal,
+      signal: signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal,
     });
 
     const text = await r.text();
     if (!r.ok) throw new Error(`LLM HTTP ${r.status}: ${text.slice(0, 300)}`);
 
     const j = JSON.parse(text);
+    const finish = j.choices?.[0]?.finish_reason;
+    if (finish === 'length' || finish === 'content_filter') {
+      throw Object.assign(new Error('模型没有返回完整回复'), { code: finish });
+    }
     const msg = j.choices?.[0]?.message ?? {};
     const content = (msg.content || '').trim();
     if (!content) throw new Error(`LLM 返回空内容（finish=${j.choices?.[0]?.finish_reason}，可能 token 被思考耗尽）`);

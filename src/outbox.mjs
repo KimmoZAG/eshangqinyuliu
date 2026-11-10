@@ -1,151 +1,145 @@
 import path from 'node:path';
-import { DIRS, log, num, sleep, appendLine, metric } from './core.mjs';
+import { DIRS, MAX_BURST, log, num, appendLine, metric, trace } from './core.mjs';
 import { sendGroup, sendC2C } from './transport.mjs';
 
-const GAP = num('SEND_GAP_MS', 1200); // 全局条间隔
-const QPM = num('GROUP_QPM', 20); // 每群每分钟
-const MAX_BURST = num('MAX_BURST', 5); // 每回合最多条数
+const GAP = num('SEND_GAP_MS', 1200);
+const QPM = Math.max(1, num('GROUP_QPM', 20));
 const RETRY = num('SEND_RETRY', 3);
-
-const queues = new Map(); // key -> [job]
-const running = new Set();
-const buckets = new Map(); // key -> [ts]
-const turnCount = new Map(); // turnId -> count
+const PRIORITY = { reply: 0, command: 1, proactive: 2 };
+const DEAD = path.join(DIRS.data, 'outbox', 'dead-letter.jsonl');
+const queues = new Map();
+const buckets = new Map();
+const completed = new Map();
 let lastSend = 0;
 
-const DEAD = path.join(DIRS.data, 'outbox', 'dead-letter.jsonl');
-
-function bucketDelay(key) {
-  const now = Date.now();
-  const arr = (buckets.get(key) || []).filter((t) => now - t < 60_000);
-  buckets.set(key, arr);
-  if (arr.length >= QPM) return 60_000 - (now - arr[0]) + 50;
+function takeSlot(key, now) {
+  const recent = (buckets.get(key) || []).filter((ts) => now - ts < 60_000);
+  const wait = Math.max(lastSend + GAP - now, recent.length >= QPM ? recent[0] + 60_000 - now : 0);
+  if (wait > 0) return wait;
+  recent.push(now);
+  buckets.set(key, recent);
+  lastSend = now;
+  if (buckets.size > 2000) {
+    for (const [id, stamps] of buckets) if (now - stamps.at(-1) >= 60_000) buckets.delete(id);
+  }
   return 0;
 }
 
-function takeToken(key) {
-  const arr = buckets.get(key) || [];
-  arr.push(Date.now());
-  buckets.set(key, arr);
-}
-
-/** 入队。返回 {ok, id, code} */
-export function enqueue(job) {
-  const key = job.scope === 'c2c' ? `c2c:${job.openid}` : job.group;
-
-  if (job.turnId) {
-    const used = turnCount.get(job.turnId) || 0;
-    if (used >= MAX_BURST) {
-      metric('burst_capped');
-      return Promise.resolve({ ok: false, reason: 'burst_cap' });
-    }
-    turnCount.set(job.turnId, used + 1);
-  }
-
-  if (!queues.has(key)) queues.set(key, []);
-  const q = queues.get(key);
-  if (job.dedupeKey && q.some((j) => j.dedupeKey === job.dedupeKey)) {
-    return Promise.resolve({ ok: false, reason: 'duplicate' });
-  }
-
-  q.push(job);
+function waitForWork(queue, ms) {
   return new Promise((resolve) => {
-    job.resolve = resolve;
-    kick(key);
+    const timer = setTimeout(finish, ms);
+    function finish() {
+      clearTimeout(timer);
+      queue.wake = null;
+      resolve();
+    }
+    queue.wake = finish;
   });
 }
 
-async function kick(key) {
-  if (running.has(key)) return;
-  running.add(key);
-  try {
-    await drain(key);
-  } finally {
-    running.delete(key);
+function finish(queue, job) {
+  queue.jobs.splice(queue.jobs.indexOf(job), 1);
+  if (job.dedupeKey && job.results.some((result) => result.ok)) {
+    completed.set(job.dedupeKey, job.deadline);
+    if (completed.size > 5000) completed.delete(completed.keys().next().value);
   }
+  job.resolve(job.results);
 }
 
-async function drain(key) {
-  const q = queues.get(key);
-  while (q && q.length) {
-    const job = q[0];
+function fail(queue, job, result) {
+  job.results.push({ ok: false, index: job.index, ...result });
+  metric('send_fail');
+  trace({ kind: 'send_failed', turnId: job.turnId, reason: result.reason, code: result.code, status: result.status });
+  finish(queue, job);
+}
 
-    if (job.deadline && Date.now() > job.deadline) {
-      q.shift();
-      metric('send_expired');
-      job.resolve({ ok: false, reason: 'expired' });
+async function drain(key, queue) {
+  while (queue.jobs.length) {
+    const job = queue.jobs.reduce((first, next) => PRIORITY[next.kind] < PRIORITY[first.kind] ? next : first);
+    const now = Date.now();
+    if (now >= job.deadline || job.shouldSend && !job.shouldSend()) {
+      fail(queue, job, { reason: now >= job.deadline ? 'expired' : 'stale' });
       continue;
     }
-
-    const wait = bucketDelay(key);
+    const wait = job.retryAt > now ? job.retryAt - now : takeSlot(key, now);
     if (wait > 0) {
-      await sleep(Math.min(wait, 3000));
+      await waitForWork(queue, Math.min(wait, job.deadline - now));
       continue;
     }
-    const gap = lastSend + GAP - Date.now();
-    if (gap > 0) await sleep(gap);
-
-    takeToken(key);
-    lastSend = Date.now();
-
-    let res;
+    const text = job.lines[job.index];
+    const body = job.msgId
+      ? { msg_type: 0, content: text, msg_id: job.msgId, msg_seq: job.index + 1 }
+      : { msg_type: 0, content: text };
+    let response;
     try {
-      res = job.scope === 'c2c' ? await sendC2C(job.openid, job.body) : await sendGroup(job.group, job.body);
-    } catch (e) {
-      res = { status: 500, data: { err_code: -1, message: e.message } };
+      const signal = AbortSignal.timeout(Math.min(8000, job.deadline - now));
+      response = job.scope === 'c2c'
+        ? await sendC2C(job.openid, body, signal)
+        : await sendGroup(job.group, body, signal);
+    } catch {
+      response = { status: 503 };
     }
-
-    const code = res.data?.err_code;
-    if (!code) {
-      q.shift();
-      job.resolve({ ok: true, id: res.data?.id });
+    const code = response.data?.err_code || response.data?.code;
+    const status = response.status;
+    if (status >= 200 && status < 300 && !code && response.data?.id) {
+      job.results.push({ ok: true, id: response.data.id, index: job.index });
+      metric('send_ok');
+      if (job.index === 0 && job.receivedAt) {
+        trace({ kind: 'first_reply_delivered', turnId: job.turnId, ms: Date.now() - job.receivedAt });
+      }
+      job.index += 1;
+      job.attempt = 0;
+      job.retryAt = 0;
+      if (job.index === job.lines.length) finish(queue, job);
       continue;
     }
-
-    // 被动回复失败不重试（窗口/去重/内容违规重试也无用）
-    if (job.kind === 'reply') {
-      q.shift();
-      metric(`send_fail_${code}`);
-      job.resolve({ ok: false, code, message: res.data?.message });
+    const retryable = status >= 500 || status === 429 || code === 50055001;
+    job.attempt += 1;
+    if (job.kind === 'proactive' && retryable && job.attempt <= RETRY) {
+      job.retryAt = Date.now() + 1000 * 3 ** (job.attempt - 1);
       continue;
     }
-
-    const retryable = res.status >= 500 || res.status === 429 || code === 50055001;
-    job.attempt = (job.attempt || 0) + 1;
-    if (retryable && job.attempt <= RETRY) {
-      await sleep(1000 * 3 ** (job.attempt - 1));
-      continue;
+    if (job.kind === 'proactive') {
+      appendLine(DEAD, { at: new Date().toISOString(), key, code, status, message: response.data?.message, body });
+      log('outbox', key, '发送失败', status, code);
     }
-
-    q.shift();
-    metric(`send_fail_${code}`);
-    appendLine(DEAD, { at: new Date().toISOString(), key, code, message: res.data?.message, body: job.body });
-    log('outbox', `${key} 失败 code=${code} ${res.data?.message}`);
-    job.resolve({ ok: false, code, message: res.data?.message });
+    fail(queue, job, { reason: 'send_failed', code, status });
   }
 }
 
-/** 一轮多条的便捷入口（自动 msg_seq 递增） */
-export async function sendLines({ scope = 'group', group, openid, lines, msgId, turnId, kind = 'reply', deadlineMs }) {
-  const results = [];
-  let n = 0;
-  for (const text of lines) {
-    n += 1;
-    const body = msgId
-      ? { msg_type: 0, content: text, msg_id: msgId, msg_seq: n }
-      : { msg_type: 0, content: text };
-    const r = await enqueue({
-      scope,
-      group,
-      openid,
-      kind,
-      body,
-      turnId,
-      dedupeKey: msgId ? `${msgId}:${n}` : undefined,
-      deadline: deadlineMs ? Date.now() + deadlineMs : undefined,
-    });
-    results.push(r);
-    if (!r.ok) break;
+async function runQueue(key, queue) {
+  queue.running = true;
+  try {
+    await drain(key, queue);
+  } catch (error) {
+    log('outbox', '处理异常', error.message);
+    for (const job of queue.jobs.splice(0)) job.resolve([...job.results, { ok: false, reason: 'queue_error' }]);
+  } finally {
+    queue.running = false;
+    if (queue.jobs.length) void runQueue(key, queue);
+    else queues.delete(key);
   }
-  return results;
+}
+
+export function sendLines({
+  scope = 'group', group, openid, lines, msgId, turnId, kind = 'reply',
+  deadline = Date.now() + 60_000, receivedAt, shouldSend,
+}) {
+  const key = scope === 'c2c' ? 'c2c:' + openid : group;
+  const messages = lines.filter((line) => typeof line === 'string' && line.trim()).slice(0, MAX_BURST);
+  if (!messages.length) return Promise.resolve([]);
+  const dedupeKey = msgId ? key + ':' + msgId : turnId;
+  const queue = queues.get(key) || { jobs: [], running: false, wake: null };
+  if (dedupeKey && (completed.get(dedupeKey) > Date.now() || queue.jobs.some((job) => job.dedupeKey === dedupeKey))) {
+    return Promise.resolve([{ ok: false, reason: 'duplicate' }]);
+  }
+  queues.set(key, queue);
+  return new Promise((resolve) => {
+    queue.jobs.push({
+      scope, group, openid, lines: messages, msgId, turnId, kind, deadline, receivedAt, shouldSend,
+      dedupeKey, resolve, index: 0, results: [], attempt: 0, retryAt: 0,
+    });
+    queue.wake?.();
+    if (!queue.running) void runQueue(key, queue);
+  });
 }

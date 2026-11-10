@@ -38,6 +38,7 @@ define('绑定', {
     if (!arg) return { lines: ['码呢 管理给你那个码 发我'] };
     const r = redeem(arg, uid);
     if (!r.ok) return { lines: [r.reason] };
+    memory.setAlias(uid, r.name);
     if (r.repeat) return { lines: [`你早就是${r.name}了`] };
     return { lines: [`行 ${r.name} 记下了 以后别装别人`] };
   },
@@ -45,27 +46,22 @@ define('绑定', {
 
 define('战绩', {
   aliases: ['stats', '战况'],
-  handler: ({ arg }) => {
-    const p = memory.profileTable();
-    const target = Object.entries(p).find(([, v]) => arg && v.name && v.name.includes(arg));
+  handler: ({ arg, group }) => {
+    const people = memory.memberIds(group);
+    const target = people.find((id) => arg && memory.nameOf(id).includes(arg));
     if (target) {
-      const [, v] = target;
-      const bits = (v.bits || []).slice(-3).join('；') || '暂无可引用战绩';
-      return { lines: [`${v.name}：${bits}`] };
+      const claims = memory.memberClaims(group, target).map((claim) => claim.text);
+      return { lines: claims.length ? claims : [memory.nameOf(target) + ' 在这个群没留过能引用的战绩'] };
     }
-    const list = Object.values(p)
-      .filter((v) => v.name)
-      .slice(-6)
-      .map((v) => v.name)
-      .join('、');
+    const list = people.slice(-6).map((id) => memory.nameOf(id)).join('、');
     return { lines: [list ? `现在认得的：${list}。要查谁？` : '我还没认人，先@我说“我是zrc”这种。'] };
   },
 });
 
 define('开黑报名', {
   aliases: ['报名', '开黑'],
-  handler: ({ uid }) => {
-    setSession(uid, { plugin: '开黑报名', step: 1, data: {} });
+  handler: ({ sessionKey }) => {
+    setSession(sessionKey, { plugin: '开黑报名', step: 1, data: {} });
     return { lines: ['几点开，LOL还是CS？直接说，我给你记着。'] };
   },
 });
@@ -95,23 +91,23 @@ define('话题', {
 /* ---------------- 会话处理（多轮） ---------------- */
 
 const sessions = {
-  开黑报名: ({ uid }, session, text) => {
+  开黑报名: ({ sessionKey }, session, text) => {
     if (session.step === 1) {
       const data = { ...session.data, when: text.slice(0, 40) };
-      setSession(uid, { plugin: '开黑报名', step: 2, data });
+      setSession(sessionKey, { plugin: '开黑报名', step: 2, data });
       return { lines: [`记下了：${data.when}。谁跟？让他们@我报名。`] };
     }
-    clearSession(uid);
+    clearSession(sessionKey);
     return { lines: ['报名完了，别放鸽子。'] };
   },
 };
 
 export function runSession(ctx, text) {
-  const s = getSession(ctx.uid);
+  const s = getSession(ctx.sessionKey);
   if (!s) return null;
   const fn = sessions[s.plugin];
   if (!fn) {
-    clearSession(ctx.uid);
+    clearSession(ctx.sessionKey);
     return null;
   }
   return fn(ctx, s, text);

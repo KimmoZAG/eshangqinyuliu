@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { addAbortListener } from 'node:events';
 import { log } from '../core.mjs';
 
 /**
@@ -17,8 +18,18 @@ export function createStdioClient({ name, command, args = [], env = {}, timeoutM
   const stderrTail = [];
   let exited = false;
 
+  function settle(id) {
+    const entry = pending.get(id);
+    if (!entry) return;
+    pending.delete(id);
+    clearTimeout(entry.timer);
+    entry.listener?.[Symbol.dispose]();
+    return entry;
+  }
+
+  child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
-    buf += chunk.toString('utf8');
+    buf += chunk;
     let idx;
     while ((idx = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, idx).trim();
@@ -30,12 +41,7 @@ export function createStdioClient({ name, command, args = [], env = {}, timeoutM
       } catch {
         continue; // 非 JSON 噪声
       }
-      const entry = msg.id != null ? pending.get(msg.id) : null;
-      if (entry) {
-        pending.delete(msg.id);
-        clearTimeout(entry.timer);
-        entry.resolve(msg);
-      }
+      settle(msg.id)?.resolve(msg);
     }
   });
 
@@ -46,32 +52,37 @@ export function createStdioClient({ name, command, args = [], env = {}, timeoutM
     if (stderrTail.length > 20) stderrTail.shift();
   });
 
-  child.on('exit', (code, signal) => {
+  function stop(error) {
     exited = true;
-    for (const [, entry] of pending) {
-      clearTimeout(entry.timer);
-      entry.reject(new Error(`MCP ${name} 进程退出 code=${code} signal=${signal}`));
-    }
-    pending.clear();
+    for (const id of pending.keys()) settle(id).reject(error);
+  }
+  child.on('error', stop);
+  child.stdin.on('error', stop);
+  child.on('exit', (code, signal) => {
+    stop(new Error(`MCP ${name} 进程退出 code=${code} signal=${signal}`));
     log('mcp', `${name} 退出 code=${code}`);
   });
 
-  function request(method, params, { timeout = timeoutMs } = {}) {
+  function request(method, params, { timeout = timeoutMs, signal } = {}) {
     if (exited) return Promise.reject(new Error(`MCP ${name} 已退出`));
+    if (signal?.aborted) return Promise.reject(signal.reason);
     seq += 1;
     const id = seq;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(Object.assign(new Error(`MCP ${name} ${method} 超时 ${timeout}ms`), { code: 'timeout' }));
+        settle(id)?.reject(Object.assign(new Error(`MCP ${name} ${method} 超时 ${timeout}ms`), { code: 'timeout' }));
       }, timeout);
-      pending.set(id, { resolve, reject, timer });
+      const listener = signal && addAbortListener(signal, () => {
+        settle(id)?.reject(signal.reason);
+        if (!exited) child.stdin.write(JSON.stringify({
+          jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id },
+        }) + '\n');
+      });
+      pending.set(id, { resolve, reject, timer, listener });
       try {
         child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
       } catch (e) {
-        clearTimeout(timer);
-        pending.delete(id);
-        reject(e);
+        settle(id)?.reject(e);
       }
     });
   }
@@ -97,12 +108,12 @@ export function createStdioClient({ name, command, args = [], env = {}, timeoutM
     return res.result?.tools || [];
   }
 
-  async function callTool(toolName, toolArgs, { timeout = timeoutMs } = {}) {
-    const res = await request('tools/call', { name: toolName, arguments: toolArgs || {} }, { timeout });
+  async function callTool(toolName, toolArgs, { timeout = timeoutMs, signal } = {}) {
+    const res = await request('tools/call', { name: toolName, arguments: toolArgs || {} }, { timeout, signal });
     if (res.error) {
       const err = new Error(res.error.message || `JSON-RPC ${res.error.code}`);
       err.rpcCode = res.error.code;
-      err.code = res.error.code === -32602 ? 'tool_not_found' : 'rpc_error';
+      err.code = res.error.code === -32602 ? 'bad_args' : 'rpc_error';
       throw err;
     }
     const content = res.result?.content || [];

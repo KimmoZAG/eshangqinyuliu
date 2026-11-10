@@ -84,7 +84,7 @@ export async function runTopic(group, { manual = false } = {}) {
     });
 
     const ok = r.some((x) => x.ok);
-    for (let i = 0; i < Math.min(r.filter((x) => x.ok).length, lines.length); i += 1) memory.addSelf(group, lines[i]);
+    for (const sent of r) if (sent.ok) memory.addSelf(group, lines[sent.index], { id: sent.id });
     trace({ kind: 'topic', group, manual, ok, lines: lines.length, cycle: job.cycleId });
     metric(ok ? 'topic_ok' : 'topic_fail');
 

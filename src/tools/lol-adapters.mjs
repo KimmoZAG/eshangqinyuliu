@@ -6,24 +6,20 @@
  * 2. get-match-vods 只给平台 + id —— 这里拼成可点链接
  * 3. eventId 传错抛 TypeError —— 收敛成结构化 not_found
  */
+import { setTimeout as wait } from 'node:timers/promises';
 const BASE = process.env.LOL_API_BASE_URL || 'https://esports-api.lolesports.com';
 const KEY = process.env.LOL_API_KEY || '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z';
 
 const scheduleCache = new Map(); // path+params -> {at, data}
 
-async function gwOnce(url) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15_000);
-  try {
-    const r = await fetch(url, { headers: { 'x-api-key': KEY }, signal: ctrl.signal });
-    if (!r.ok) throw Object.assign(new Error(`lolesports HTTP ${r.status}`), { code: 'upstream_unavailable' });
-    return await r.json();
-  } finally {
-    clearTimeout(timer);
-  }
+async function gwOnce(url, signal) {
+  const timeout = AbortSignal.timeout(15_000);
+  const r = await fetch(url, { headers: { 'x-api-key': KEY }, signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+  if (!r.ok) throw Object.assign(new Error(`lolesports HTTP ${r.status}`), { code: 'upstream_unavailable' });
+  return r.json();
 }
 
-async function gw(path, params = {}) {
+async function gw(path, params, signal) {
   const url = new URL(`${BASE}/persisted/gw/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const key = url.toString();
@@ -34,12 +30,13 @@ async function gw(path, params = {}) {
   let last;
   for (let i = 0; i < 3; i += 1) {
     try {
-      const data = await gwOnce(url);
+      const data = await gwOnce(url, signal);
       scheduleCache.set(key, { at: Date.now(), data });
       return data;
     } catch (e) {
       last = e;
-      await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+      signal?.throwIfAborted();
+      if (i < 2) await wait(400 * (i + 1), undefined, { signal });
     }
   }
   throw last;
@@ -89,8 +86,8 @@ export default function registerLolAdapters(register, client) {
       },
     },
     ttlMs: 180_000,
-    call: async ({ team = '', state = 'all', limit = 8 }) => {
-      const j = await gw('getSchedule', { hl: 'zh-CN' });
+    call: async ({ team = '', state = 'all', limit = 8 }, { signal }) => {
+      const j = await gw('getSchedule', { hl: 'zh-CN' }, signal);
       const events = j?.data?.schedule?.events || [];
       const t = String(team).toLowerCase();
       const rows = events
@@ -126,19 +123,23 @@ export default function registerLolAdapters(register, client) {
         date: { type: 'string', description: "today / yesterday / tomorrow 或 YYYY-MM-DD，默认 today" },
         days: { type: 'number', description: '从 date 起向后覆盖几天，1-7，默认 1' },
         state: { type: 'string', enum: ['all', 'completed', 'upcoming'] },
+        league: { type: 'string', description: '可选联赛名或缩写，如 LPL、LCK、Worlds' },
       },
     },
     ttlMs: 120_000,
-    call: async ({ date = 'today', days = 1, state = 'all' }) => {
+    call: async ({ date = 'today', days = 1, state = 'all', league = '' }, { signal }) => {
       const day = normDay(date);
       const span = Math.min(Math.max(Number(days) || 1, 1), 7);
       const start = Date.parse(`${day}T00:00:00+08:00`);
       const end = start + span * 86400e3;
 
-      const j = await gw('getSchedule', { hl: 'zh-CN' });
+      const j = await gw('getSchedule', { hl: 'zh-CN' }, signal);
       const events = j?.data?.schedule?.events || [];
+      const leagueName = league.toLowerCase();
       const rows = events
         .filter((e) => e?.match?.id)
+        .filter((e) => !leagueName || [e.league?.name, e.league?.slug].some((name) =>
+          String(name || '').toLowerCase() === leagueName))
         .filter((e) => {
           const t = Date.parse(e.startTime);
           return t >= start && t < end;
@@ -166,6 +167,7 @@ export default function registerLolAdapters(register, client) {
 
       return {
         date: day,
+        league,
         days: span,
         count: rows.length,
         matches: rows.slice(0, 12),
@@ -187,8 +189,8 @@ export default function registerLolAdapters(register, client) {
       },
     },
     ttlMs: 600_000,
-    call: async ({ league = 'Worlds' } = {}) => {
-      const j = await gw('getSchedule', { hl: 'zh-CN' });
+    call: async ({ league = 'Worlds' }, { signal }) => {
+      const j = await gw('getSchedule', { hl: 'zh-CN' }, signal);
       const events = (j?.data?.schedule?.events || []).filter((e) => e?.match?.id);
       const key = String(league || '').toLowerCase();
       const mine = events.filter(
@@ -238,8 +240,8 @@ export default function registerLolAdapters(register, client) {
       },
     },
     ttlMs: 120_000,
-    call: async ({ limit = 6, team = '' } = {}) => {
-      const j = await gw('getSchedule', { hl: 'zh-CN' });
+    call: async ({ limit = 6, team = '' }, { signal }) => {
+      const j = await gw('getSchedule', { hl: 'zh-CN' }, signal);
       const events = j?.data?.schedule?.events || [];
       const t = String(team || '').toLowerCase();
       const rows = events
@@ -270,6 +272,8 @@ export default function registerLolAdapters(register, client) {
     },
   });
 
+  if (!client) return;
+
   register('lol_event_vods', {
     domain: 'lol',
     description: '查某场比赛的 VOD 可点链接。需要先用 lol_resolve_event 拿到 event_id。',
@@ -279,10 +283,10 @@ export default function registerLolAdapters(register, client) {
       required: ['event_id'],
     },
     ttlMs: 3_600_000,
-    call: async ({ event_id }) => {
+    call: async ({ event_id }, { signal }) => {
       let text;
       try {
-        const r = await client.callTool('get-match-vods', { eventId: event_id, language: 'zh-CN' }, { timeout: 60_000 });
+        const r = await client.callTool('get-match-vods', { eventId: event_id, language: 'zh-CN' }, { timeout: 60_000, signal });
         text = r.text;
         if (r.isError) throw Object.assign(new Error('该场次没有 VOD 或 event_id 无效'), { code: 'not_found' });
       } catch (e) {
@@ -313,8 +317,8 @@ export default function registerLolAdapters(register, client) {
       required: ['event_id'],
     },
     ttlMs: 300_000,
-    call: async ({ event_id }) => {
-      const r = await client.callTool('get-event-details', { eventId: event_id, language: 'zh-CN' }, { timeout: 60_000 });
+    call: async ({ event_id }, { signal }) => {
+      const r = await client.callTool('get-event-details', { eventId: event_id, language: 'zh-CN' }, { timeout: 60_000, signal });
       if (r.isError || /Cannot read properties of null/i.test(r.text) || /❌ \*\*Error\*\*/.test(r.text)) {
         throw Object.assign(new Error('event_id 无效，先用 lol_resolve_event 查'), { code: 'not_found' });
       }

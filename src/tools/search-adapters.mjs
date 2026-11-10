@@ -10,7 +10,7 @@ const TIMEOUT = Number(process.env.SEARCH_TIMEOUT_MS || 15000);
 // 时政/选举/政治类不接：群是游戏群，这类话题也不适合机器人参与
 const POLITICAL = /(选举|大选|翻蓝|翻红|总统|议会|政党|执政|在野|弹劾|外交|制裁|战争|军事|领土|台独|港独|政治|时政|政变|示威|游行)/;
 
-async function search(query, maxResults = 5) {
+async function search(query, maxResults, signal) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
   try {
@@ -18,7 +18,7 @@ async function search(query, maxResults = 5) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, max_results: maxResults }),
-      signal: ctrl.signal,
+      signal: signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal,
     });
     if (!r.ok) throw Object.assign(new Error(`搜索 HTTP ${r.status}`), { code: 'upstream_unavailable' });
     const j = await r.json();
@@ -43,14 +43,14 @@ export default function registerSearchAdapters(register) {
       required: ['query'],
     },
     ttlMs: 10 * 60 * 1000,
-    call: async ({ query, max_results = 5 }) => {
+    call: async ({ query, max_results = 5 }, { signal }) => {
       const q = String(query || '').trim();
       if (!q) throw Object.assign(new Error('query 不能为空'), { code: 'bad_request' });
       if (POLITICAL.test(q)) {
         throw Object.assign(new Error('这类时政话题我不参与，聊点游戏吧'), { code: 'refused' });
       }
 
-      const rows = await search(q, Math.min(Math.max(Number(max_results) || 5, 1), 8));
+      const rows = await search(q, Math.min(Math.max(Number(max_results) || 5, 1), 8), signal);
       if (!rows.length) {
         throw Object.assign(new Error('没搜到相关内容'), { code: 'not_found' });
       }

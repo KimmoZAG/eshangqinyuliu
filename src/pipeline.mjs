@@ -1,4 +1,4 @@
-import { log, num, trace } from './core.mjs';
+import { log, num, quietNow, trace } from './core.mjs';
 
 /* ---------------- 1. 去重 ---------------- */
 
@@ -88,9 +88,10 @@ export function guardIn(cfg, evt) {
 
 export function interjectRules(cfg, text, isAt, selfJustSpoke) {
   if (!cfg.features.interject || isAt) return { ok: false, reason: 'not_candidate' };
+  if (quietNow(cfg)) return { ok: false, reason: 'quiet' };
   if (selfJustSpoke) return { ok: false, reason: 'self_spoke' };
   if (!text || text.length < 4) return { ok: false, reason: 'too_short' };
-  if (/^[\\p{Emoji}\\s]+$/u.test(text)) return { ok: false, reason: 'emoji_only' };
+  if (/^[\p{Extended_Pictographic}\s\u200d\ufe0f]+$/u.test(text)) return { ok: false, reason: 'emoji_only' };
   return { ok: true };
 }
 

@@ -8,7 +8,7 @@ function need(name) {
   return v;
 }
 
-export async function getToken(force = false) {
+export async function getToken(force = false, signal = AbortSignal.timeout(8000)) {
   const now = Date.now();
   if (!force && cache.token && now < cache.exp - 60_000) return cache.token;
 
@@ -16,6 +16,7 @@ export async function getToken(force = false) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ appId: need('QQ_APP_ID'), clientSecret: need('QQ_APP_SECRET') }),
+    signal,
   });
   const j = await r.json();
   if (!j.access_token) throw new Error(`获取 access_token 失败: ${JSON.stringify(j)}`);
@@ -25,14 +26,15 @@ export async function getToken(force = false) {
   return cache.token;
 }
 
-export async function api(method, path, body) {
+export async function api(method, path, body, { signal = AbortSignal.timeout(8000) } = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  headers.Authorization = `QQBot ${await getToken()}`;
+  headers.Authorization = `QQBot ${await getToken(false, signal)}`;
 
   const r = await fetch(`${API}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
   const text = await r.text();
   let data;

@@ -10,7 +10,8 @@
  * 服务特性（已实测）：无鉴权、无状态（不校验 Mcp-Session-Id）、恒返 HTTP 200，
  * 错误放在 body 的 error 字段里，所以不能用状态码判断成败。
  */
-import { log, num, sleep } from './core.mjs';
+import { setTimeout as wait } from 'node:timers/promises';
+import { log, num } from './core.mjs';
 
 const URL = process.env.OPGG_MCP_URL || 'https://mcp-api.op.gg/mcp';
 const TIMEOUT = num('OPGG_TIMEOUT_MS', 25000);
@@ -23,13 +24,16 @@ const cache = new Map();
 
 /* ---------------- JSON-RPC ---------------- */
 
-async function post(body) {
+async function post(body, signal) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
   const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
   if (session) headers['mcp-session-id'] = session;
   try {
-    const r = await fetch(URL, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal });
+    const r = await fetch(URL, {
+      method: 'POST', headers, body: JSON.stringify(body),
+      signal: signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal,
+    });
     const sid = r.headers.get('mcp-session-id');
     if (sid) session = sid;
     const text = await r.text();
@@ -44,7 +48,7 @@ async function post(body) {
   }
 }
 
-async function init() {
+async function init(signal) {
   if (inited) return;
   inited = true;
   try {
@@ -53,21 +57,26 @@ async function init() {
       id: ++seq,
       method: 'initialize',
       params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'jinha', version: '1.0.0' } },
-    });
+    }, signal);
     // 通知没有 id，服务端正常回 202 空 body；失败也不影响后续（该服务无状态）
-    await post({ jsonrpc: '2.0', method: 'notifications/initialized' }).catch(() => {});
+    await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, signal).catch(() => {});
   } catch (e) {
+    if (signal?.aborted) {
+      inited = false;
+      throw e;
+    }
     log('opgg', `握手失败，降级为无会话直连：${e.message}`);
   }
 }
 
 /** 业务错误（-326xx）不重试，网络错误/5xx 最多重试 RETRIES 次 */
-async function rpc(method, params) {
-  await init();
+async function rpc(method, params, signal) {
+  signal?.throwIfAborted();
+  await init(signal);
   let last;
   for (let attempt = 0; attempt <= RETRIES; attempt += 1) {
     try {
-      const text = await post({ jsonrpc: '2.0', id: ++seq, method, params });
+      const text = await post({ jsonrpc: '2.0', id: ++seq, method, params }, signal);
       let msg;
       try {
         msg = JSON.parse(text);
@@ -83,7 +92,8 @@ async function rpc(method, params) {
     } catch (e) {
       last = e;
       if (e.rpcCode || !e.retryable) throw e; // 参数/业务错误不重试
-      if (attempt < RETRIES) await sleep(800 * (attempt + 1));
+      signal?.throwIfAborted();
+      if (attempt < RETRIES) await wait(800 * (attempt + 1), undefined, { signal });
     }
   }
   throw last;
@@ -211,8 +221,8 @@ export function parseDsl(text) {
 
 /* ---------------- 工具调用 ---------------- */
 
-async function callTool(name, args) {
-  const r = await rpc('tools/call', { name, arguments: args });
+async function callTool(name, args, signal) {
+  const r = await rpc('tools/call', { name, arguments: args }, signal);
   const text = (r?.content || [])
     .map((p) => p.text)
     .filter(Boolean)
@@ -253,7 +263,7 @@ export function registerOpggTools(register) {
       },
       required: ['champion', 'position'],
     },
-    call: async ({ champion, position }) => {
+    call: async ({ champion, position }, { signal }) => {
       const pos = String(position || '').toLowerCase();
       if (!POSITIONS.includes(pos)) throw new Error(`position 必须是 ${POSITIONS.join('/')}`);
       const key = `ca:${norm(champion)}:${pos}`;
@@ -271,7 +281,7 @@ export function registerOpggTools(register) {
             'data.strong_counters[].{champion_name,my_win_rate,counter_win_rate}',
             'data.weak_counters[].{champion_name,my_win_rate,counter_win_rate}',
           ],
-        });
+        }, signal);
         const s = d?.data?.summary?.average_stats || {};
         return {
           champion: d?.champion || norm(champion),
@@ -318,14 +328,14 @@ export function registerOpggTools(register) {
       properties: { position: { type: 'string', enum: POSITIONS } },
       required: ['position'],
     },
-    call: async ({ position }) => {
+    call: async ({ position }, { signal }) => {
       const pos = String(position || '').toLowerCase();
       if (!POSITIONS.includes(pos)) throw new Error(`position 必须是 ${POSITIONS.join('/')}`);
       return memo(`lm:${pos}`, 30 * 60e3, async () => {
         const d = await callTool('lol_list_lane_meta_champions', {
           position: pos,
           desired_output_fields: [`data.positions.${pos}[].{champion,tier,win_rate,pick_rate,ban_rate,play}`],
-        });
+        }, signal);
         const list = d?.data?.positions?.[pos] || [];
         const byTier = {};
         for (const c of list) {
@@ -371,7 +381,7 @@ export function registerOpggTools(register) {
       },
       required: ['my_champion', 'opponent_champion', 'position'],
     },
-    call: async ({ my_champion, opponent_champion, position }) => {
+    call: async ({ my_champion, opponent_champion, position }, { signal }) => {
       const pos = String(position || '').toLowerCase();
       if (!POSITIONS.includes(pos)) throw new Error(`position 必须是 ${POSITIONS.join('/')}`);
       return memo(`mu:${norm(my_champion)}:${norm(opponent_champion)}:${pos}`, 6 * 3600e3, async () => {
@@ -380,7 +390,7 @@ export function registerOpggTools(register) {
           position: pos,
           my_champion: norm(my_champion),
           opponent_champion: norm(opponent_champion),
-        });
+        }, signal);
         if (!d?.data) throw new Error('对线数据为空');
         const s = d.data.summary?.average_stats || {};
         return {
@@ -409,7 +419,7 @@ export function registerOpggTools(register) {
       },
       required: ['game_name', 'tag_line'],
     },
-    call: async ({ game_name, tag_line }) => {
+    call: async ({ game_name, tag_line }, { signal }) => {
       const gn = String(game_name || '').trim();
       const tl = String(tag_line || '').trim().replace(/^#/, '');
       if (!gn || !tl) throw new Error('game_name 和 tag_line 都要给');
@@ -420,7 +430,7 @@ export function registerOpggTools(register) {
             tag_line: t,
             region: 'KR',
             desired_output_fields: ['data.summoner.{game_name,tagline,level,player,ladder_rank}'],
-          });
+          }, signal);
 
         // 该服务对不存在的 Riot ID 会直接抛 "Summoner not found"，这里统一收敛成 null
         const read = async (g, t) => {
@@ -440,7 +450,10 @@ export function registerOpggTools(register) {
         // 名字查不到或查到空壳 → 把入参当选手别名反查一次。
         // 例：用户说「Faker」，Faker#KR1 是 3 级空号，真号是 Hide on bush#KR1。
         if (isEmpty(s)) {
-          const alias = await callTool('lol_get_pro_player_riot_id', { player_name: gn, region: 'KR' }).catch(() => null);
+          const alias = await callTool('lol_get_pro_player_riot_id', { player_name: gn, region: 'KR' }, signal).catch(() => {
+            signal?.throwIfAborted();
+            return null;
+          });
           const p = alias?.data?.player;
           if (p?.riot_id?.game_name) {
             const s2 = await read(p.riot_id.game_name, p.riot_id.tagline);

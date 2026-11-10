@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { addAbortListener } from 'node:events';
 import { DIRS, log, readJson } from './core.mjs';
 import { createStdioClient } from './mcp/stdio.mjs';
 import { registerOpggTools } from './opgg.mjs';
@@ -49,23 +51,62 @@ export function toolMeta(name) {
   return t ? { name: t.name, domain: t.domain, heavy: t.heavy } : null;
 }
 
-export async function callTool(name, args) {
+function matchesSchema(value, schema, strict = false) {
+  if (schema === false) return false;
+  if (!schema || schema === true) return true;
+  if (schema.anyOf && !schema.anyOf.some((option) => matchesSchema(value, option, strict))) return false;
+  if (schema.oneOf && schema.oneOf.filter((option) => matchesSchema(value, option, strict)).length !== 1) return false;
+  if (schema.allOf && !schema.allOf.every((option) => matchesSchema(value, option, strict))) return false;
+  if (schema.enum && !schema.enum.includes(value)) return false;
+  if (schema.const !== undefined && value !== schema.const) return false;
+  const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  if (schema.type && ![schema.type].flat().some((expected) =>
+    type === expected || expected === 'integer' && Number.isInteger(value))) return false;
+  if (type === 'object') {
+    if ((schema.required || []).some((key) => !Object.hasOwn(value, key))) return false;
+    for (const [key, val] of Object.entries(value)) {
+      if (Object.hasOwn(schema.properties || {}, key)) {
+        if (!matchesSchema(val, schema.properties[key], strict)) return false;
+      } else if (schema.additionalProperties !== undefined) {
+        if (!matchesSchema(val, schema.additionalProperties, strict)) return false;
+      } else if (strict && schema.properties) return false;
+    }
+  }
+  if (type === 'array' && schema.items && !value.every((item) => matchesSchema(item, schema.items, strict))) return false;
+  if (type === 'number' && (!Number.isFinite(value) || value < schema.minimum || value > schema.maximum)) return false;
+  if (type === 'string' && (value.length < schema.minLength || value.length > schema.maxLength)) return false;
+  return true;
+}
+
+export async function callTool(name, args, { signal, allowed, key: conversation } = {}) {
   const t = registry.get(name);
   if (!t) return { ok: false, error: `没有工具 ${name}`, code: 'tool_not_found' };
 
+  if (signal?.aborted) return { ok: false, code: 'timeout', error: '查询超时' };
+  if (allowed && !allowed.has(name)) return { ok: false, code: 'tool_not_allowed', error: '当前问题不可用此工具' };
+  if (allowed && (!args || typeof args !== 'object' || Array.isArray(args) || !matchesSchema(args, t.schema, true))) {
+    return { ok: false, code: 'bad_args', error: '参数不符合工具 schema' };
+  }
   const key = `${name}:${JSON.stringify(args || {})}`;
   if (t.ttlMs > 0) {
     const hit = cache.get(key);
     if (hit && Date.now() - hit.at < t.ttlMs) return { ok: true, result: hit.val, cached: true };
   }
 
+  let listener;
   try {
-    let out = await t.call(args || {});
+    const pending = Promise.resolve(t.call(args || {}, { signal, key: conversation }));
+    const abort = signal && new Promise((_, reject) => {
+      listener = addAbortListener(signal, () => reject(signal.reason));
+    });
+    let out = await (abort ? Promise.race([pending, abort]) : pending);
     if (typeof out === 'string' && out.length > TRUNCATE) out = `${out.slice(0, TRUNCATE)}…[已截断]`;
     if (t.ttlMs > 0) cache.set(key, { at: Date.now(), val: out });
     return { ok: true, result: out };
   } catch (e) {
-    return { ok: false, error: e.message, code: e.code || 'tool_error' };
+    return { ok: false, error: e.message, code: signal?.aborted ? 'timeout' : e.code || 'tool_error' };
+  } finally {
+    listener?.[Symbol.dispose]();
   }
 }
 
@@ -77,24 +118,20 @@ register('recall_memory', {
   domain: 'internal',
   description: '在群里的历史事件/梗/战绩里检索，返回最相关的几条',
   schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
-  call: ({ query }) => memory.searchEpisodes(query, 5).map((e) => e.text),
+  call: ({ query }, { key }) => memory.searchEpisodes(key, query, 5).map((e) => e.text),
 });
 
 register('member_profile', {
   domain: 'internal',
   description: '查询某个群友的画像：短板、梗、最近被锐评过的角度',
   schema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
-  call: ({ name }) => {
-    const p = memory.profileTable();
-    const hit = Object.entries(p).find(([, v]) => v.name && v.name.includes(name));
-    if (!hit) return { found: false };
-    const [id, v] = hit;
+  call: ({ name }, { key }) => {
+    const id = key && memory.memberIds(key).find((id) => memory.nameOf(id).includes(name));
+    if (!id) return { found: false };
     return {
       found: true,
-      name: v.name,
-      weaknesses: v.weaknesses || [],
-      bits: v.bits || [],
-      usedAngles: Object.keys(memory.usedAngles(id)),
+      name: memory.nameOf(id),
+      usedAngles: memory.usedAngles(key, id),
     };
   },
 });
@@ -104,6 +141,22 @@ register('member_profile', {
 registerOpggTools(register);
 
 /* ---------------- 配置驱动的 MCP（stdio） ---------------- */
+
+async function loadAdapters(cfg, client) {
+  let loaded = 0;
+  for (const rel of cfg.adapters || []) {
+    try {
+      const mod = await import(pathToFileURL(path.resolve(rel)).href);
+      const fn = mod.default || mod.registerAdapters;
+      if (typeof fn !== 'function') throw new Error('没有注册函数');
+      fn(register, client, cfg);
+      loaded += 1;
+    } catch (e) {
+      log('mcp', cfg.name, '适配器加载失败', rel, e.message);
+    }
+  }
+  return loaded;
+}
 
 export async function startMcpServers() {
   const cfgFile = path.join(DIRS.config, 'mcp.json');
@@ -118,17 +171,10 @@ export async function startMcpServers() {
     if (cfg.enabled === false) continue;
     // transport=none：只有适配器，没有 MCP 子进程（比如直连 HTTP API 的搜索）
     if ((cfg.transport || 'stdio') === 'none') {
-      for (const rel of cfg.adapters || []) {
-        try {
-          const mod = await import(new URL(rel, `file://${process.cwd()}/`).href);
-          const fn = mod.default || mod.registerAdapters;
-          if (typeof fn === 'function') fn(register, null, cfg);
-        } catch (e) {
-          log('mcp', `${cfg.name} 适配器加载失败 ${rel}：${e.message}`);
-        }
+      if (await loadAdapters(cfg, null)) {
+        okServers += 1;
+        log('mcp', cfg.name, '无进程适配器已加载');
       }
-      okServers += 1;
-      log('mcp', `${cfg.name} 无进程适配器已加载`);
       continue;
     }
 
@@ -137,18 +183,19 @@ export async function startMcpServers() {
       continue;
     }
 
+    let client;
     try {
-      const client = createStdioClient({
+      client = createStdioClient({
         name: cfg.name,
         command: cfg.command,
         args: cfg.args || [],
         env: cfg.env || {},
         timeoutMs: cfg.timeoutMs || 20_000,
       });
-      clients.set(cfg.name, client);
 
       const info = await client.initialize({ timeout: cfg.initTimeoutMs || 60_000 });
       const all = await client.listTools({ timeout: cfg.listTimeoutMs || 30_000 });
+      clients.set(cfg.name, client);
 
       const allow = cfg.allow || null;
       const deny = cfg.deny || [];
@@ -163,33 +210,21 @@ export async function startMcpServers() {
           schema: t.inputSchema,
           heavy: (cfg.heavy || []).includes(t.name),
           ttlMs: (cfg.ttlMs || {})[t.name] || 0,
-          call: async (args) => {
-            const r = await client.callTool(t.name, args, { timeout: cfg.toolTimeoutMs || 25_000 });
+          call: async (args, { signal }) => {
+            const r = await client.callTool(t.name, args, { timeout: cfg.toolTimeoutMs || 25_000, signal });
             // 很多服务用 isError 或"文本里写错误"来表示失败，统一收敛成异常
             const upstreamErr = /^(Failed to reach|Steam API request timed out|Unexpected response from|Error:|无法)/i.test(r.text);
-            let jsonErr = false;
-            try {
-              const j = JSON.parse(r.text);
-              if (j && typeof j === 'object' && j.error) jsonErr = true;
-            } catch {}
-            if (r.isError || upstreamErr || jsonErr) {
+            let result = r.raw?.structuredContent ?? r.text;
+            if (typeof result === 'string') {
+              try { result = JSON.parse(result); } catch {}
+            }
+            if (r.isError || upstreamErr || result?.error) {
               throw Object.assign(new Error(r.text.slice(0, 300)), { code: 'upstream_unavailable' });
             }
-            return r.text;
+            return result;
           },
         });
         injected += 1;
-      }
-
-      // 厂商适配层：补 eventId 链路、拼接 VOD URL、把 TypeError 收敛成结构化错误
-      for (const rel of cfg.adapters || []) {
-        try {
-          const mod = await import(new URL(rel, `file://${process.cwd()}/`).href);
-          const fn = mod.default || mod.registerAdapters;
-          if (typeof fn === 'function') fn(register, client, cfg);
-        } catch (e) {
-          log('mcp', `${cfg.name} 适配器加载失败 ${rel}：${e.message}`);
-        }
       }
 
       log(
@@ -199,7 +234,11 @@ export async function startMcpServers() {
       okServers += 1;
     } catch (e) {
       log('mcp', `${cfg.name} 接入失败：${e.message}`);
+      clients.delete(cfg.name);
+      client?.close();
+      client = null;
     }
+    await loadAdapters(cfg, client);
   }
 
   return { servers: okServers, tools: registry.size };

@@ -16,6 +16,7 @@ for (const d of Object.values(DIRS)) fs.mkdirSync(d, { recursive: true });
 export const TZ = 'Asia/Shanghai';
 export const env = (k, d) => process.env[k] ?? d;
 export const num = (k, d) => Number(process.env[k] ?? d);
+export const MAX_BURST = Math.max(1, Math.min(5, Math.trunc(num('MAX_BURST', 5)) || 5));
 
 export const shanghai = (d = new Date()) => new Date(d.toLocaleString('en-US', { timeZone: TZ }));
 export const dayKey = (d = new Date()) => {
@@ -91,12 +92,17 @@ export function metric(name, value = 1, extra) {
 /* ---------------- 每群配置 ---------------- */
 
 const DEFAULTS = {
-  features: { reply: true, interject: true, topic: true, search: num('SEARCH_ENABLED', 0) === 1 },
+  features: {
+    reply: true, interject: true, topic: true,
+    tools: num('DATA_TOOLS_ENABLED', num('SEARCH_ENABLED', 1)) === 1,
+    search: num('SEARCH_ENABLED', 0) === 1,
+  },
   interjectP: num('INTERJECT_P', 0.35),
   quiet: [num('QUIET_START', 2), num('QUIET_END', 8)],
   persona: 'default',
   disabledUsers: [],
-  replyLimit: num('MAX_BURST', 5),
+  replyLimit: MAX_BURST,
+  replyMode: env('REPLY_MODE', 'auto'),
 };
 
 export function groupConfig(group) {
@@ -104,7 +110,11 @@ export function groupConfig(group) {
   return {
     ...DEFAULTS,
     ...cfg,
-    features: { ...DEFAULTS.features, ...(cfg.features || {}) },
+    features: {
+      ...DEFAULTS.features,
+      tools: cfg.features?.tools ?? cfg.features?.search ?? DEFAULTS.features.tools,
+      ...cfg.features,
+    },
     quiet: cfg.quiet || DEFAULTS.quiet,
   };
 }

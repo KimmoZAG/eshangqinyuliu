@@ -1,4 +1,4 @@
-import { log, groupConfig, trace, metric, num } from './core.mjs';
+import { log, groupConfig, trace, metric, num, uid as newId } from './core.mjs';
 import { startTransport, stripAt, botOpenid, botNames, groupState, forgetGroup } from './transport.mjs';
 import * as pipeline from './pipeline.mjs';
 import * as memory from './memory.mjs';
@@ -12,8 +12,12 @@ import { loadAliases } from './bindings.mjs';
 
 const BOT_NAME = process.env.BOT_NAME || '金桦';
 const REPLY_WINDOW = num('REPLY_WINDOW_MS', 4.5 * 60 * 1000);
+const C2C_WINDOW = 55 * 60 * 1000;
+const INTERJECT_WINDOW = num('INTERJECT_WINDOW_MS', 6500);
 
 const lastSpeak = new Map(); // group -> ts
+const latestMessage = new Map();
+const interjecting = new Set();
 
 function bindAlias(text) {
   const names = Object.values(ALIASES).join('|');
@@ -26,9 +30,23 @@ function bindAlias(text) {
 
 
 /** 把自己发出去的话也记进上下文，避免复读自己 */
-function remember(key, lines, results) {
-  const ok = (results || []).filter((r) => r.ok).length;
-  for (let i = 0; i < Math.min(ok, lines.length); i += 1) memory.addSelf(key, lines[i]);
+async function deliver(key, options) {
+  const results = await sendLines(options);
+  const delivered = [];
+  for (const result of results) {
+    if (!result.ok) continue;
+    const line = options.lines[result.index];
+    memory.addSelf(key, line, { id: result.id, sourceId: options.msgId });
+    delivered.push(line);
+  }
+  return delivered;
+}
+
+function replyTurn(key, data, receivedAt, window) {
+  const sentAt = typeof data.timestamp === 'number'
+    ? data.timestamp * (data.timestamp < 1e12 ? 1000 : 1) : Date.parse(data.timestamp);
+  const origin = Number.isFinite(sentAt) ? Math.min(sentAt, receivedAt) : receivedAt;
+  return { turnId: key + ':' + (data.id || newId()), receivedAt, deadline: origin + window };
 }
 
 function atts(d) {
@@ -37,43 +55,47 @@ function atts(d) {
 
 /* ---------------- 群消息 ---------------- */
 
-async function onGroupMessage(evt) {
+async function onGroupMessage(evt, receivedAt) {
   const d = evt.data;
   const group = evt.group;
   const author = d.author || {};
 
+  if (!group || author.bot || !pipeline.dedupe(d.id)) return;
+  const turn = replyTurn(group, d, receivedAt, REPLY_WINDOW);
+  if (receivedAt >= turn.deadline) return;
   noteGroup(group);
-  if (author.bot) return;
-  if (!pipeline.dedupe(d.id)) return;
+  latestMessage.set(group, turn.turnId);
 
   const uid = author.member_openid || author.id;
   const raw = (d.content || '').trim();
-  const selfId = await botOpenid(group);
   const names = botNames();
 
   // 真提及（<@openid>）或手打的「@金桦」「@金桦（黄石版）」都算 @
-  const byTag = !!selfId && raw.includes(`<@${selfId}>`);
   const byText = names.some((n) => raw.startsWith(`@${n}`) || raw.includes(`@${n}`));
-  const isAt = evt.at === true || byTag || byText;
+  const selfId = !evt.at && !byText && raw.includes('<@') ? await botOpenid(group) : null;
+  const byTag = !!selfId && (raw.includes('<@' + selfId + '>') || raw.includes('<@!' + selfId + '>'));
+  const mentioned = evt.at === true || byTag || byText;
 
   let text = stripAt(raw);
-  if (isAt) {
+  if (mentioned) {
     for (const n of names) {
       text = text.replace(new RegExp(`^@?${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s,，:：]*`), '').trim();
     }
   }
   const cfg = groupConfig(group);
   const speaker = memory.nameOf(uid, author.username);
+  const override = agent.parseReplyMode(text, cfg.replyMode);
+  const isAt = mentioned || override.explicit;
 
-  memory.addMessage(group, {
+  if (!memory.addMessage(group, {
     id: d.id,
     ts: d.timestamp,
     u: uid,
     n: speaker,
     rawName: author.username,
-    c: text,
+    c: override.text,
     att: atts(d),
-  });
+  })) return;
 
   const gate = pipeline.guardIn(cfg, evt);
   if (!gate.ok) {
@@ -81,79 +103,80 @@ async function onGroupMessage(evt) {
     return;
   }
 
-  const ctx = { group, uid, role: author.member_role || 'member', cfg, speaker };
+  const ctx = { group, uid, sessionKey: group + ':' + uid, role: author.member_role || 'member', cfg, speaker };
 
   // 1) 命令
   const cmd = commandOf(text);
-  if (cmd) {
+  if (cmd && !override.explicit) {
     const out = runPlugin(ctx, text);
     if (out?.triggerTopic) {
       await runTopic(group, { manual: true });
       return;
     }
     if (out?.lines) {
-      await sendLines({ scope: 'group', group, lines: out.lines, kind: 'proactive', turnId: `cmd:${uid}:${Date.now()}` });
+      await deliver(group, { ...turn, group, lines: out.lines, kind: 'command', msgId: mentioned ? d.id : undefined });
     }
     return;
   }
 
   // 2) 多轮会话（仅非 @ 时接管，避免打断正常对话）
   if (!isAt) {
-    const s = pipeline.getSession(uid);
+    const s = pipeline.getSession(ctx.sessionKey);
     if (s) {
       const out = runSession(ctx, text);
       if (out?.lines) {
-        await sendLines({ scope: 'group', group, lines: out.lines, kind: 'proactive', turnId: `sess:${uid}:${Date.now()}` });
+        await deliver(group, { ...turn, group, lines: out.lines, kind: 'command' });
       }
       return;
     }
   }
 
   // 3) 认人
-  const bound = bindAlias(text);
-  if (bound) {
-    memory.setAlias(uid, bound);
-    await sendLines({
+  const bound = !override.explicit && bindAlias(text);
+  if (bound && uid) {
+    const name = memory.setAlias(uid, bound, { verified: false });
+    await deliver(group, {
+      ...turn,
       scope: 'group',
       group,
-      lines: [`行，记下了，你是${bound}`],
+      lines: ['行 记下了 你是' + name],
       msgId: isAt ? d.id : undefined,
       kind: isAt ? 'reply' : 'proactive',
-      turnId: `${group}:${d.id}`,
     });
     log('app', `bind ${uid.slice(0, 8)} -> ${bound}`);
     return;
   }
 
   const image = (d.attachments || []).find((a) => (a.content_type || '').startsWith('image/'));
+  agent.rememberClaim({ key: group, uid, speaker, text: override.text, messageId: d.id });
 
   // 4) 被 @ → 应答
   if (isAt) {
-    const turnId = `${group}:${d.id}`;
     const lines = await agent.composeReply({
+      ...turn,
       key: group,
       speaker,
       uid,
       text,
       imageUrl: image?.url,
       imageHint: !!image,
-      limit: cfg.replyLimit || 5,
+      messageId: d.id,
+      cfg,
     });
 
-    const sent = await sendLines({
+    const delivered = await deliver(group, {
+      ...turn,
       scope: 'group',
       group,
       lines,
       msgId: d.id,
       kind: 'reply',
-      turnId,
-      deadlineMs: REPLY_WINDOW,
     });
-    remember(group, lines, sent);
-
-    lastSpeak.set(group, Date.now());
-    agent.reflect({ key: group, uid, speaker, text, replyLines: lines });
-    metric('reply_at');
+    if (delivered.length) {
+      lastSpeak.set(group, Date.now());
+      agent.reflect({ key: group, text: override.text, replyLines: delivered });
+      metric('reply_at');
+    }
     return;
   }
 
@@ -163,87 +186,92 @@ async function onGroupMessage(evt) {
     trace({ kind: 'interject_skip', group, reason: rules.reason });
     return;
   }
-  if (!pipeline.canInterject(group)) {
+  if (!pipeline.canInterject(group) || interjecting.has(group)) {
     trace({ kind: 'interject_skip', group, reason: 'cooldown' });
     return;
   }
 
-  const decision = await agent.decideInterject({ key: group, uid, speaker, text, cfg });
-  if (!decision.speak) {
-    trace({ kind: 'interject_skip', group, reason: decision.reason });
-    return;
+  interjecting.add(group);
+  try {
+    const deadline = Math.min(turn.deadline, receivedAt + INTERJECT_WINDOW);
+    const shouldSend = () => latestMessage.get(group) === turn.turnId && Date.now() < deadline;
+    if (!shouldSend()) return;
+    const signal = AbortSignal.timeout(Math.max(0, Math.min(2000, deadline - Date.now())));
+    const decision = await agent.decideInterject({ key: group, uid, speaker, text, cfg, messageId: d.id, signal });
+    if (!decision.speak || !shouldSend()) {
+      trace({ kind: 'interject_skip', group, reason: decision.reason || 'stale' });
+      return;
+    }
+    const lines = await agent.composeReply({
+      ...turn, deadline, key: group, speaker, uid, text, messageId: d.id,
+      cfg, mode: 'fast', limit: 1, interject: { tone: decision.tone, target: decision.target },
+      imageUrl: image?.url, imageHint: !!image,
+    });
+    const delivered = await deliver(group, { ...turn, deadline, group, lines, kind: 'proactive', shouldSend });
+    if (delivered.length) {
+      pipeline.markInterject(group);
+      lastSpeak.set(group, Date.now());
+      agent.reflect({ key: group, text, replyLines: delivered });
+      metric('interject');
+      trace({ kind: 'interject', group, tone: decision.tone, target: decision.target });
+    }
+  } finally {
+    interjecting.delete(group);
   }
-
-  pipeline.markInterject(group);
-  const lines = await agent.composeReply({
-    key: group,
-    speaker,
-    uid,
-    text,
-    imageUrl: image?.url,
-    imageHint: !!image,
-    limit: 2,
-  });
-
-  const one = lines.slice(0, 1);
-  const sentIj = await sendLines({
-    scope: 'group',
-    group,
-    lines: one,
-    kind: 'proactive',
-    turnId: `ij:${group}:${d.id}`,
-  });
-  remember(group, one, sentIj);
-
-  lastSpeak.set(group, Date.now());
-  agent.reflect({ key: group, uid, speaker, text, replyLines: lines });
-  metric('interject');
-  trace({ kind: 'interject', group, tone: decision.tone, target: decision.target });
 }
 
 /* ---------------- 单聊 ---------------- */
 
-async function onC2C(evt) {
+async function onC2C(evt, receivedAt) {
   const d = evt.data;
   const openid = evt.openid;
   const author = d.author || {};
-  if (author.bot) return;
-  if (!pipeline.dedupe(d.id)) return;
+  if (!openid || author.bot || !pipeline.dedupe(d.id)) return;
 
   const text = stripAt(d.content || '');
   const key = `c2c:${openid}`;
+  const turn = replyTurn(key, d, receivedAt, C2C_WINDOW);
+  if (receivedAt >= turn.deadline) return;
+  const cfg = groupConfig(key);
+  const override = agent.parseReplyMode(text, cfg.replyMode);
   const speaker = memory.nameOf(openid, author.username || '你');
 
-  memory.addMessage(key, {
+  if (!memory.addMessage(key, {
     id: d.id,
     ts: d.timestamp,
     u: openid,
     n: speaker,
     rawName: author.username,
-    c: text,
+    c: override.text,
     att: atts(d),
-  });
+  })) return;
 
-  const bound = bindAlias(text);
+  const bound = !override.explicit && bindAlias(text);
   if (bound) {
-    memory.setAlias(openid, bound);
-    await sendLines({ scope: 'c2c', openid, lines: [`行，记下了，你是${bound}`], msgId: d.id, kind: 'reply', turnId: `c2c:${d.id}` });
+    const name = memory.setAlias(openid, bound, { verified: false });
+    await deliver(key, { ...turn, scope: 'c2c', openid, lines: ['行 记下了 你是' + name], msgId: d.id });
     return;
   }
 
   const image = (d.attachments || []).find((a) => (a.content_type || '').startsWith('image/'));
-  const lines = await agent.composeReply({ key, speaker, uid: openid, text, imageUrl: image?.url, imageHint: !!image, limit: 4 });
+  agent.rememberClaim({ key, uid: openid, speaker, text: override.text, messageId: d.id });
+  const lines = await agent.composeReply({
+    ...turn, key, speaker, uid: openid, text, cfg, messageId: d.id,
+    imageUrl: image?.url, imageHint: !!image, limit: Math.min(cfg.replyLimit, 4),
+  });
 
-  await sendLines({
+  const delivered = await deliver(key, {
+    ...turn,
     scope: 'c2c',
     openid,
     lines,
     msgId: d.id,
     kind: 'reply',
-    turnId: `c2c:${d.id}`,
-    deadlineMs: 55 * 60 * 1000,
   });
-  metric('reply_c2c');
+  if (delivered.length) {
+    agent.reflect({ key, text: override.text, replyLines: delivered });
+    metric('reply_c2c');
+  }
 }
 
 /* ---------------- 通知 ---------------- */
@@ -275,11 +303,19 @@ function applyAliases() {
   for (const [openid, v] of Object.entries(aliases)) {
     if (!v?.name) continue;
     const p = memory.profile(openid);
-    if (p.name !== v.name || !p.bound) memory.setAlias(openid, v.name);
+    if (p.name !== v.name || !p.verified) memory.setAlias(openid, v.name);
   }
 }
 
-async function main() {
+export async function handleEvent(evt, raw = {}) {
+  const receivedAt = Date.now();
+  if (evt.type === 'message' && evt.scope === 'group') await onGroupMessage(evt, receivedAt);
+  else if (evt.type === 'message' && evt.scope === 'c2c') await onC2C(evt, receivedAt);
+  else if (evt.type === 'notice') await onNotice(evt);
+  else if (evt.type === 'request') log('request', evt.sub, JSON.stringify(raw.d || {}).slice(0, 200));
+}
+
+export async function startApp() {
   applyAliases();
   setInterval(applyAliases, 60_000);
   const boot = await startMcpServers();
@@ -290,24 +326,9 @@ async function main() {
 
   startTransport({
     onEvent: (evt, raw) => {
-      const run = async () => {
-        if (evt.type === 'message' && evt.scope === 'group') await onGroupMessage(evt);
-        else if (evt.type === 'message' && evt.scope === 'c2c') await onC2C(evt);
-        else if (evt.type === 'notice') await onNotice(evt);
-        else if (evt.type === 'request') log('request', evt.sub, JSON.stringify(raw.d).slice(0, 200));
-      };
-      run().catch((e) => log('app', `处理异常 ${evt.type}/${evt.sub}: ${e.stack || e.message}`));
+      handleEvent(evt, raw).catch((e) => log('app', `处理异常 ${evt.type}/${evt.sub}: ${e.stack || e.message}`));
     },
   });
 
   startJobs();
 }
-
-process.on('unhandledRejection', (e) => log('app', '[unhandled]', e?.stack || e));
-process.on('uncaughtException', (e) => log('app', '[uncaught]', e?.stack || e));
-process.on('SIGTERM', () => {
-  log('app', 'SIGTERM，退出');
-  process.exit(0);
-});
-
-main();

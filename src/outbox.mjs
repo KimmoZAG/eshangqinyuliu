@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { DIRS, MAX_BURST, log, num, appendLine, metric, trace } from './core.mjs';
 import { sendGroup, sendC2C } from './transport.mjs';
+import { renderLines } from './mentions.mjs';
 
 const GAP = num('SEND_GAP_MS', 1200);
 const QPM = Math.max(1, num('GROUP_QPM', 20));
@@ -126,7 +127,9 @@ export function sendLines({
   deadline = Date.now() + 60_000, receivedAt, shouldSend,
 }) {
   const key = scope === 'c2c' ? 'c2c:' + openid : group;
-  const messages = lines.filter((line) => typeof line === 'string' && line.trim()).slice(0, MAX_BURST);
+  // 群消息把 @名字 换成真实提及 <@openid>，否则只是纯文本
+  const source = scope === 'group' ? renderLines(lines) : lines;
+  const messages = source.filter((line) => typeof line === 'string' && line.trim()).slice(0, MAX_BURST);
   if (!messages.length) return Promise.resolve([]);
   const dedupeKey = msgId ? key + ':' + msgId : turnId;
   const queue = queues.get(key) || { jobs: [], running: false, wake: null };

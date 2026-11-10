@@ -180,7 +180,9 @@ export async function composeReply({ key, speaker, uid, text, imageUrl, imageHin
   const lowInfo = isLowInfo(text)
     ? '\n对方只是随口应了一声，不要复述上文、不要补充信息、不要分析，就回一句很短的（不超过 10 个字），或者顺着怼一句。'
     : '';
-  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(limit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}${saidHint}${nameHint}${lowInfo}`;
+  const questions = splitQuestions(text);
+  const effLimit = Math.max(Math.min(limit, 5), questions.length);
+  const userText = `${ctx}\n\n现在跟你说话的是「${speaker}」，他说：「${text || '（发了张图，没写文字）'}」\n按运行规则回他 1-${Math.min(effLimit, 3)} 行，每行一条，够说清就一条，别硬凑。${angleHint}${saidHint}${nameHint}${lowInfo}${coverageNote(questions)}`;
 
   const messages = [{ role: 'system', content: systemPrompt() }];
   const img = imageUrl ? await fetchImage(imageUrl) : null;
@@ -259,6 +261,35 @@ export async function decideInterject({ key, uid, speaker, text, cfg }) {
   const p = cfg.interjectP ?? 0.35;
   if (Math.random() > p) return { speak: false, reason: 'sampled_out' };
   return { speak: true, tone: verdict.tone, target: verdict.target };
+}
+
+
+/* ---------------- 多问题拆解 ---------------- */
+
+/** 把“问题？问题？问题？”拆成 1-3 个子问题（确定性规则，不靠模型） */
+export function splitQuestions(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  const parts = t
+    .split(/[？?]/)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 4);
+  // 没有问号但明显是多句（句号/感叹号分隔）也拆
+  if (parts.length <= 1) {
+    const alt = t
+      .split(/[。！!]/)
+      .map((x) => x.trim())
+      .filter((x) => x.length >= 6 && /吗|呢|什么|多少|哪|怎么|是不是|多久|几/.test(x));
+    if (alt.length > 1) return alt.slice(0, 3);
+  }
+  return parts.slice(0, 3);
+}
+
+/** 答案行数和问题数不匹配时，给模型的补齐指令 */
+function coverageNote(questions) {
+  if (questions.length <= 1) return '';
+  return `\n这条消息里有 ${questions.length} 个问题，必须逐个回答，一个一行，顺序别乱：\n${questions
+    .map((q, i) => `${i + 1}) ${q}`)
+    .join('\n')}\n即使某个问题查不到，也要单独占一行说“这个没查到”。`;
 }
 
 /* ---------------- 慢通道：工具循环 ---------------- */
@@ -400,6 +431,7 @@ export async function planAndCompose({ key, speaker, uid, text, domain }) {
 
   const catalog = tools.map((t) => ({ name: t.name, description: t.description, schema: t.schema }));
   const ctx = memory.buildContext(key, { query: text, memberIds: [uid] });
+  const questions = splitQuestions(text);
   const messages = [
     {
       role: 'system',
@@ -409,7 +441,7 @@ export async function planAndCompose({ key, speaker, uid, text, domain }) {
         (DOMAIN_PROTOCOL[domain] || '') +
         `\n可用工具（JSON）：${JSON.stringify(catalog)}`,
     },
-    { role: 'user', content: `${ctx}\n\n「${speaker}」问：「${text}」` },
+    { role: 'user', content: `${ctx}\n\n「${speaker}」问：「${text}」${coverageNote(questions)}` },
   ];
 
   for (let i = 0; i < 3; i += 1) {
@@ -448,8 +480,18 @@ export async function planAndCompose({ key, speaker, uid, text, domain }) {
         });
         continue;
       }
+      const got = String(plan.final).split('\n').filter((x) => x.trim()).length;
+      if (questions.length >= 2 && got < questions.length && i < 2) {
+        trace({ kind: 'plan_under_cover', key, need: questions.length, got });
+        messages.push({ role: 'assistant', content: JSON.stringify({ final: plan.final }) });
+        messages.push({
+          role: 'user',
+          content: `你只答了 ${got} 个，还有 ${questions.length - got} 个问题没答。逐个补齐，一共 ${questions.length} 行，不许合并。`,
+        });
+        continue;
+      }
       trace({ kind: 'plan_final', key, steps: i });
-      return sanitizeLines(splitReplies(plan.final, 5));
+      return sanitizeLines(splitReplies(plan.final, Math.max(5, questions.length)));
     }
     if (!plan.tool) return null;
 

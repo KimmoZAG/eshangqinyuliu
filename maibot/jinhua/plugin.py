@@ -237,17 +237,18 @@ class JinhuaPlugin(MaiBotPlugin):
         session = message["session_id"]
         hinted = bool(group and ADDRESSED_HINT.search(text))
         addressed = bool(not group or message.get("is_at") or callout or message.get("is_mentioned") or hinted)
-        if group and not addressed:
+        if group:
             try:
                 adaptive = self.adaptive(group)
             except Exception:
                 adaptive = False
-            if adaptive:
+            if adaptive and not addressed:
                 message["message_info"]["additional_config"]["jinhua_adaptive"] = True
             try:
                 self.ctx.logger.info(
-                    "金桦群消息入站 msg_id=%s 自适应=%s 判定=%s",
-                    message["message_id"], adaptive, "点名/在叫我" if addressed else "旁观",
+                    "金桦入站 判定=%s explicit=%s at段=%s is_at=%s is_men=%s 文本=%r",
+                    "点名" if addressed else "旁观", addressed,
+                    at_segment, bool(message.get("is_at")), bool(message.get("is_mentioned")), text[:30],
                 )
             except Exception:
                 pass

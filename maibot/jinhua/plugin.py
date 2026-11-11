@@ -519,28 +519,35 @@ class JinhuaPlugin(MaiBotPlugin):
         return {"action": "continue"}
 
 
-    # QQ 客户端对 Unicode emoji 支持有限：新版、带 VS16 变体符、ZWJ 组合和肤色修饰
-    # 都会显示成方块。这里在出站前按 EMOJI_MODE 处理。
-    EMOJI_SAFE = set("\U0001F600\U0001F601\U0001F602\U0001F603\U0001F604\U0001F605\U0001F60A"
-                     "\U0001F609\U0001F60E\U0001F62D\U0001F621\U0001F44D\U0001F44E"
-                     "\U0001F64F\U0001F525\U0001F480\u2728\u2764")
-    EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF),
-                    (0xFE00, 0xFE0F), (0x200D, 0x200D), (0x1F3FB, 0x1F3FF))
+    # QQ 客户端对 Unicode emoji 支持有限。实测容易变方块的是三类：
+    #   1) 组合序列（ZWJ U+200D）  2) 变体符/肤色修饰（FE0F / 1F3FB-1F3FF）
+    #   3) Unicode 12 之后新增的码位（1FA70-1FAFF，如 🫠🫡🥹）
+    # safe 模式只删这三类，保留绝大多数常见表情；strip 全删；all 不处理。
+    EMOJI_ALL = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF), (0x2190, 0x21FF))
+    EMOJI_RISKY = ((0x1FA70, 0x1FAFF), (0x1F3FB, 0x1F3FF), (0x200D, 0x200D), (0xFE00, 0xFE0F))
 
     def sanitize_emoji(self, segments) -> int:
         mode = (os.environ.get("EMOJI_MODE") or "safe").strip().lower()
         if mode == "all":
             return 0
+        extra = os.environ.get("EMOJI_EXTRA") or ""
         dropped = [0]
+
+        def pick(ch: str) -> bool:
+            code = ord(ch)
+            if mode == "strip":
+                return any(lo <= code <= hi for lo, hi in self.EMOJI_ALL)
+            return any(lo <= code <= hi for lo, hi in self.EMOJI_RISKY)
 
         def clean(text: str) -> str:
             out = []
             for ch in text:
-                code = ord(ch)
-                if any(lo <= code <= hi for lo, hi in self.EMOJI_RANGES):
-                    if mode == "strip" or ch not in self.EMOJI_SAFE:
-                        dropped[0] += 1
-                        continue
+                if ch in extra:
+                    out.append(ch)
+                    continue
+                if pick(ch):
+                    dropped[0] += 1
+                    continue
                 out.append(ch)
             return "".join(out)
 

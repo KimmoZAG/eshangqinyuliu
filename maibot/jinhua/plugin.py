@@ -27,6 +27,8 @@ ADDRESSED_HINT = re.compile(
     r"(?:你|妳)[^。！？!?]{0,20}(?:不回|没回|不说话|说话|在吗|在不在|闭嘴|装死|哑了|死了|欠|机器人|\bAI\b)"
 )
 
+SELF_TAG = re.compile(r"<@!?([^>\s]{6,})>")
+
 EMOJI_TOKEN = re.compile(r"\[\[([^\[\]]{1,12})\]\]")
 
 PATTERN = (
@@ -182,8 +184,14 @@ class JinhuaPlugin(MaiBotPlugin):
             user_info["user_nickname"] = alias
             if group:
                 user_info["user_cardname"] = alias
+        # 先按原始正文判定“是否在叫我”，再剥离 @ 标记后交给模型
+        original = (message.get("processed_plain_text") or "").strip()
+        tagged = bool(group and SELF_TAG.search(original))
+        callout = bool(group and (tagged or LEADING_CALLOUT.match(original)))
         text = command_text(message)
-        callout = bool(group and LEADING_CALLOUT.match((message.get("processed_plain_text") or "").strip()))
+        text = SELF_TAG.sub("", text).strip()
+        if original:
+            message["processed_plain_text"] = text
         if callout:
             message["is_mentioned"] = True
             if re.match(PATTERN, text):
@@ -207,13 +215,19 @@ class JinhuaPlugin(MaiBotPlugin):
         hinted = bool(group and ADDRESSED_HINT.search(text))
         addressed = bool(not group or message.get("is_at") or callout or message.get("is_mentioned") or hinted)
         if group and not addressed:
-            adaptive = self.adaptive(group)
+            try:
+                adaptive = self.adaptive(group)
+            except Exception:
+                adaptive = False
             if adaptive:
                 message["message_info"]["additional_config"]["jinhua_adaptive"] = True
-            self.ctx.logger.info(
-                "金桦群消息入站 msg_id=%s 自适应=%s 判定=%s",
-                message["message_id"], adaptive, "点名/在叫我" if addressed else "旁观",
-            )
+            try:
+                self.ctx.logger.info(
+                    "金桦群消息入站 msg_id=%s 自适应=%s 判定=%s",
+                    message["message_id"], adaptive, "点名/在叫我" if addressed else "旁观",
+                )
+            except Exception:
+                pass
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
         self.remember(session, turn)
         if text in {"闭嘴", "说话"} and not (self.admin(user, role) or alias == "张睿诚"):

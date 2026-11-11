@@ -24,9 +24,10 @@ PATTERN = (
     r"^/(?:帮助|help|菜单|绑定|bind|认证|战绩|stats|战况|开黑报名|报名|开黑|闭嘴|安静|"
     r"说话|暧昧|撩|话题|发图|表情|金桦)(?:\s|$)|^(?:闭嘴|说话)$"
 )
-LEADING_CALLOUT = re.compile(r"^@?(?:金桦（黄石版）|金桦)[\s，,：:]*")
+LEADING_CALLOUT = re.compile(
+    r"^(?:@金桦(?:（黄石版）)?|金桦(?:（黄石版）)?[啊呀哇欸诶]?(?=$|[\s，,：:！!？?、。/]))[\s，,：:]*"
+)
 RELATIONSHIP_CLAIM = re.compile(r"我(?:就是|是)\s*(?:诚哥|张睿诚|zrc|浩文|刘浩文|lhw)", re.I)
-TOPIC_INTERVAL = 6 * 3600
 
 
 class PluginSettings(PluginConfigBase):
@@ -73,8 +74,6 @@ class JinhuaPlugin(MaiBotPlugin):
         self.latest: dict[str, str] = {}
         self.active_tools: dict[str, tuple[str, set[str]]] = {}
         self.registrations: dict[tuple[str, str], int] = {}
-        self.interjections: dict[str, list[int]] = {}
-        self.started = time.time()
 
     async def on_unload(self) -> None:
         self.turns.clear()
@@ -115,6 +114,9 @@ class JinhuaPlugin(MaiBotPlugin):
         start, end = hours
         hour = datetime.now(timezone(timedelta(hours=8))).hour
         return start <= hour < end if start <= end else hour >= start or hour < end
+
+    def adaptive(self, group: str) -> bool:
+        return bool(self.state.policy(group).get("interject", True)) and not self.quiet(group)
 
     async def say(self, message: dict, text: str, *, history: bool = True) -> bool:
         result = await self.ctx.send.text(text, message["session_id"], reply_message=message,
@@ -170,6 +172,8 @@ class JinhuaPlugin(MaiBotPlugin):
             message["is_at"] = True
         session = message["session_id"]
         addressed = bool(not group or message.get("is_at") or callout or message.get("is_mentioned"))
+        if group and not addressed and self.adaptive(group):
+            message["message_info"]["additional_config"]["jinhua_adaptive"] = True
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
         self.remember(session, turn)
         if text in {"闭嘴", "说话"} and not (self.admin(user, role) or alias == "张睿诚"):
@@ -211,10 +215,7 @@ class JinhuaPlugin(MaiBotPlugin):
         elif name == "绑定":
             response = self.state.redeem(arg, user) if arg else "把管理发你的绑定码带上"
         elif name in {"闭嘴", "说话"}:
-            values = {"interject": name == "说话"}
-            if values["interject"] and "last_topic" not in self.state.policy(group):
-                values["last_topic"] = time.time()
-            self.state.update_group(group, **values)
+            self.state.update_group(group, interject=name == "说话")
             response = "行 @我再来" if name == "闭嘴" else "行 有话我就接"
         elif name == "暧昧":
             if arg not in {"开", "关", "on", "off"}:
@@ -261,7 +262,7 @@ class JinhuaPlugin(MaiBotPlugin):
                     response = "素材库没找到这个名字"
         elif name == "金桦":
             policy = self.state.policy(group)
-            response = "接话：" + ("自适应" if policy.get("interject") else "仅点名")
+            response = "接话：" + ("自适应" if policy.get("interject", True) else "仅点名")
             response += " ｜ 图片：" + ("开" if policy.get("media", True) else "关")
             if arg in {"媒体 开", "媒体 关"}:
                 if group and self.admin(user, role):
@@ -304,13 +305,15 @@ class JinhuaPlugin(MaiBotPlugin):
                             anchored.evidence[key] = row
         policy = self.state.policy(turn.group)
         ordinary = turn.group and not turn.explicit
-        quiet = ordinary and (not policy.get("interject") or self.quiet(turn.group))
+        quiet = ordinary and not self.adaptive(turn.group)
         allowed = {"no_action", "stop", "wait"}
         if turn.explicit:
             # 被 @ 或叫到名字时必须回一句，不许选沉默
             allowed.discard("no_action")
+        if ordinary and not quiet:
+            allowed.discard("wait")
         lookup_items = turn.lookup_items
-        if not quiet:
+        if not quiet and not (ordinary and turn.handled):
             allowed.update({"reply", "read_tool_result", "query_memory", "query_person_profile"})
             if lookup_items and policy.get("tools", True) and turn.needs_lookup and int(time.time() * 1000) < turn.lookup_deadline_ms:
                 allowed.add("jinhua_lookup")
@@ -341,25 +344,24 @@ class JinhuaPlugin(MaiBotPlugin):
         self.active_tools[session] = (turn.anchor, {tool["function"]["name"] for tool in tools})
         if not quiet:
             hint = (
-                "\n金桦规则：真实点名、回复档位与私聊优先回复。普通群聊先判断有没有自然落点。"
+                "\n金桦规则：真实点名、回复档位与私聊优先回复。"
                 "赛事、价格、排名等当下事实先调用 jinhua_lookup。多问一次逐题传入原问题，沿用原顺序。"
                 "拿到查询状态后调用 reply，部分失败照常答已查到的题。"
                 "短接话一条就够，真正有转折或第二个意思再分条。"
             )
             if ordinary:
                 hint += (
-                    "\n普通群聊默认等待。有人面向群里求助、问看法、邀请互动，或者你能接一个当前话题里的具体梗时才接。"
-                    "群友互相回应后已聊完、确认进度、私下约时间、报状态、道别，或已经有人给了答案时，用 wait。"
-                    "能说『收到』、附和或给一句泛泛建议，不构成接话理由。"
+                    "\n自适应接话：结合最近几轮，判断新消息是不是在对金桦说话。"
+                    "同一个人接着回应、反驳、追问或补充你刚说的话，即使没喊名字也要接。"
+                    "例如你刚说『给你记一功』，对方紧接着说『我不要记功，我要实在一点的』，"
+                    "这是在跟你继续聊，用 reply，msg_id 选这条新消息。"
+                    "群友互聊、转向别人、对全群广播，或只是在谈论金桦时，用 stop 结束本轮。"
+                    "先判断对方在和谁说话，只有对方在对你说话时才查工具或回复。"
                 )
             if lookup_items and "jinhua_lookup" in allowed:
                 hint += "\n下列查询项的 text 保留原句，别改写。" + " / ".join(lookup_items)
             if turn.topic:
                 hint += " 当前是管理员请求话题，请对当前消息回一条自然的开黑话头。"
-            last_topic = policy.get("last_topic", self.started)
-            if ordinary and policy.get("topic", True) and time.time() - last_topic >= TOPIC_INTERVAL:
-                hint += " 有定时话题候选，只在这批消息本身能自然接上时抛话头。"
-                turn.topic = True
             for item in kwargs["items"]:
                 if item.get("item_type") == "SystemMessageItem":
                     item["parts"].append({"type": "text", "text": hint})
@@ -483,12 +485,8 @@ class JinhuaPlugin(MaiBotPlugin):
         if now >= turn.expires_ms:
             return abort("当前回合已经超时")
         policy = self.state.policy(turn.group)
-        if turn.group and not turn.explicit:
-            if not policy.get("interject") or self.quiet(turn.group):
-                return abort("当前群处于仅点名或静默时段")
-            stamps = [stamp for stamp in self.interjections.get(turn.group, []) if now - stamp < 600_000]
-            if turn.lines == 0 and (len(stamps) >= 2 or stamps and now - stamps[-1] < 90_000):
-                return abort("接话频率已到上限")
+        if turn.group and not turn.explicit and not self.adaptive(turn.group):
+            return abort("当前群处于仅点名或静默时段")
         segments = message.get("raw_message", [])
         media = sum(seg.get("type") in {"image", "emoji"} for seg in segments)
         if media and (not policy.get("media", True) or turn.media + media > 1):
@@ -518,15 +516,9 @@ class JinhuaPlugin(MaiBotPlugin):
         anchor = message.get("reply_to") or kwargs.get("reply_message_id")
         turn = self.get_turn(message["session_id"], anchor) if anchor else None
         if kwargs.get("sent") and turn and message.get("platform") == "qq":
-            if turn.group and not turn.explicit and turn.lines == 0:
-                now = int(time.time() * 1000)
-                self.interjections[turn.group] = [stamp for stamp in self.interjections.get(turn.group, [])
-                                                   if now - stamp < 600_000] + [now]
             turn.lines += 1
             turn.media += int(any(seg.get("type") in {"image", "emoji"} for seg in message.get("raw_message", [])))
             turn.handled = True
-            if turn.group and turn.topic:
-                self.state.update_group(turn.group, last_topic=time.time())
         return {"action": "continue"}
 
 

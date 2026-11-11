@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -195,6 +196,70 @@ class InstalledUpstreamTests(unittest.IsolatedAsyncioTestCase):
             result = await JinhuaPlugin.receive(plugin, message=message)
             user = result["modified_kwargs"]["message"]["message_info"]["user_info"]
             self.assertEqual(user, {"user_id": "unified-id", "user_nickname": "绑定称呼", "user_cardname": "绑定称呼"})
+
+    async def test_qq_adaptive_uses_planner_instead_of_frequency_gates(self):
+        from jinhua.plugin import JinhuaPlugin
+        from src.maisaka.scenes.group.mentions import detect_mentions
+        from src.maisaka.scenes.group.scheduling import GroupTurnScheduler
+        from src.plugin_runtime.hook_payloads import deserialize_session_message
+        from src.plugins.built_in.qq_official_adapter.codec import GROUP_MESSAGE_EVENT, decode_message
+
+        policy = {"quiet": [0, 0]}
+        plugin = SimpleNamespace(
+            state=SimpleNamespace(policy=lambda _: policy, name=lambda _: ""), active_tools={}, registrations={},
+        )
+        turns = {}
+        plugin.remember = lambda session, turn: turns.update({(session, turn.anchor): turn})
+        plugin.get_turn = lambda session, anchor: turns.get((session, anchor))
+        plugin.planning_turn = lambda session: next(reversed(turns.values()))
+        plugin.quiet = lambda group: JinhuaPlugin.quiet(plugin, group)
+        plugin.adaptive = lambda group: JinhuaPlugin.adaptive(plugin, group)
+
+        def incoming(anchor, text):
+            message, _, _ = decode_message(GROUP_MESSAGE_EVENT, {
+                "id": anchor, "group_openid": "pilot", "author": {"member_openid": "member"}, "content": text,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }, account_id="bot")
+            return message
+
+        message = incoming("followup", "我不要记功，我要实在一点的东西")
+        session = message["session_id"]
+        result = await JinhuaPlugin.receive(plugin, message=message)
+        candidate = deserialize_session_message(result["modified_kwargs"]["message"])
+        self.assertFalse(candidate.is_at or candidate.is_mentioned)
+        runtime = SimpleNamespace(
+            _get_message_quiet_period_remaining_seconds=lambda: 0,
+            _is_reply_frequency_silent=lambda: False,
+            _agent_state="wait", _STATE_WAIT="wait", _pending_wait_started_at=time.time(),
+            message_cache=[candidate], _last_processed_index=0,
+        )
+        scheduler = GroupTurnScheduler(runtime)
+        self.assertTrue(scheduler._evaluate(1).should_trigger)
+        self.assertEqual(scheduler.accepted_wait_started_at, runtime._pending_wait_started_at)
+
+        async def plan():
+            return (await JinhuaPlugin.planner(plugin, session_id=session, items=[
+                {"item_type": "SystemMessageItem", "parts": []},
+            ], tool_definitions=[{"function": {"name": name}} for name in ("reply", "wait", "stop")]))["modified_kwargs"]
+
+        planned = await plan()
+        self.assertIn("判断新消息是不是在对金桦说话", planned["items"][0]["parts"][0]["text"])
+        self.assertEqual([tool["function"]["name"] for tool in planned["tool_definitions"]], ["reply", "stop"])
+        outgoing = {"platform": "qq", "session_id": session, "reply_to": "followup",
+                    "raw_message": [{"type": "text", "data": "行 你开个价"}]}
+        self.assertEqual((await JinhuaPlugin.before_send(plugin, message=outgoing))["action"], "continue")
+
+        about_bot = incoming("about", "金桦今天在群里回得挺快")
+        await JinhuaPlugin.receive(plugin, message=about_bot)
+        self.assertFalse(turns[(session, "about")].explicit)
+        self.assertFalse(detect_mentions(deserialize_session_message(about_bot))[1])
+
+        policy["interject"] = False
+        blocked = incoming("blocked", "还有呢")
+        await JinhuaPlugin.receive(plugin, message=blocked)
+        self.assertNotIn("jinhua_adaptive", blocked["message_info"]["additional_config"])
+        self.assertNotIn("reply", [tool["function"]["name"] for tool in (await plan())["tool_definitions"]])
+        self.assertEqual((await JinhuaPlugin.before_send(plugin, message=outgoing))["action"], "abort")
 
     async def test_qq_partial_delivery_keeps_actual_fragment(self):
         from src.plugins.built_in.qq_official_adapter.plugin import QQOfficialAdapterPlugin

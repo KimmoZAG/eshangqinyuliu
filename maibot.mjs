@@ -9,7 +9,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const directory = path.resolve(process.env.JINHUA_MAIBOT_DIR || 'data/maibot');
 const upstream = path.join(directory, 'node_modules', 'maibot-upstream');
 const instance = path.join(directory, 'instance');
-const patch = path.join(root, 'maibot', 'qq-delivery.patch');
+const patches = ['qq-delivery.patch', 'adaptive-planner.patch'];
 const uv = process.env.JINHUA_UV || 'uv';
 const [command = 'help', ...args] = process.argv.slice(2);
 
@@ -34,10 +34,13 @@ function checkedUpstream() {
   if (actual !== revision) throw new Error('MaiBot 源码版本与固定版本不符 ' + revision);
 }
 
-function applyDeliveryPatch() {
+function applyPatches() {
   const gitArgs = ['-C', upstream, 'apply'];
-  const reverse = spawnSync('git', [...gitArgs, '--reverse', '--check', patch], { stdio: 'ignore' });
-  if (reverse.status !== 0) exec('git', [...gitArgs, patch]);
+  for (const filename of patches) {
+    const patch = path.join(root, 'maibot', filename);
+    const reverse = spawnSync('git', [...gitArgs, '--reverse', '--check', patch], { stdio: 'ignore' });
+    if (reverse.status !== 0) exec('git', [...gitArgs, patch]);
+  }
 }
 
 try {
@@ -48,14 +51,14 @@ try {
       exec('git', ['clone', '--depth', '1', '--branch', version, 'https://github.com/Mai-with-u/MaiBot.git', upstream]);
     }
     checkedUpstream();
-    applyDeliveryPatch();
+    applyPatches();
     const locked = fs.existsSync(path.join(upstream, 'uv.lock'));
     exec(uv, ['sync', '--no-dev', '--python', '3.12', '--project', upstream, ...(locked ? ['--locked'] : [])]);
     exec(uv, ['run', '--no-sync', '--project', upstream, 'maibot', 'init', '--directory', instance]);
     configure('configure');
   } else if (['configure', 'run', 'memory-review', 'test', 'replay'].includes(command)) {
     checkedUpstream();
-    applyDeliveryPatch();
+    applyPatches();
     if (command === 'replay') {
       exec(process.execPath, [path.join(root, 'maibot', 'replay.mjs'), uv, upstream, directory, ...args]);
     } else if (command === 'test') {

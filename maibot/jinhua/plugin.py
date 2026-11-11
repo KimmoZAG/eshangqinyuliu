@@ -85,7 +85,15 @@ class JinhuaPlugin(MaiBotPlugin):
         self.latest: dict[str, str] = {}
         self.active_tools: dict[str, tuple[str, set[str]]] = {}
         self.registrations: dict[tuple[str, str], int] = {}
-        self.ctx.logger.info("金桦自适应接话已加载，可按 msg_id 追踪入站、判断和发送")
+        images = self.ctx.paths.data_dir / "images"
+        try:
+            count = len(list(images.glob("*.png")))
+        except Exception:
+            count = -1
+        self.ctx.logger.info(
+            "金桦自适应接话已加载 | data_dir=%s | images=%s 个 | 存在=%s",
+            self.ctx.paths.data_dir, count, images.is_dir(),
+        )
 
     async def on_unload(self) -> None:
         self.turns.clear()
@@ -147,7 +155,16 @@ class JinhuaPlugin(MaiBotPlugin):
                     return base64.b64encode(data).decode("ascii")
         result = await self.ctx.call_capability("emoji.get_by_description", description=name, limit=1, exact=True)
         item = result.get("emoji") if isinstance(result, dict) else None
-        return item.get("base64", "") if isinstance(item, dict) else ""
+        if isinstance(item, dict) and item.get("base64"):
+            return item.get("base64", "")
+        try:
+            self.ctx.logger.warning(
+                "金桦素材未命中 name=%s root=%s 存在=%s 文件=%s",
+                name, root, root.is_dir(), len(list(root.glob('*.png'))) if root.is_dir() else 0,
+            )
+        except Exception:
+            pass
+        return ""
 
 
     def emoji_file(self, tag: str) -> str:

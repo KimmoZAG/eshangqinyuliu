@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import time
 from collections import OrderedDict
@@ -20,6 +21,11 @@ COMMANDS = {
     "stats": "战绩", "战况": "战绩", "报名": "开黑报名", "开黑": "开黑报名",
     "安静": "闭嘴", "撩": "暧昧",
 }
+# 没点名但在跟机器人说话：第二人称 + 不回/说话/在吗，或直接骂机器人
+ADDRESSED_HINT = re.compile(
+    r"(?:你|妳)[^。！？!?]{0,20}(?:不回|没回|不说话|说话|在吗|在不在|闭嘴|装死|哑了|死了|欠|机器人|\bAI\b)"
+)
+
 PATTERN = (
     r"^/(?:帮助|help|菜单|绑定|bind|认证|战绩|stats|战况|开黑报名|报名|开黑|闭嘴|安静|"
     r"说话|暧昧|撩|话题|发图|表情|金桦)(?:\s|$)|^(?:闭嘴|说话)$"
@@ -172,12 +178,16 @@ class JinhuaPlugin(MaiBotPlugin):
         if group and text == "/话题" and self.admin(user, role):
             message["is_at"] = True
         session = message["session_id"]
-        addressed = bool(not group or message.get("is_at") or callout or message.get("is_mentioned"))
+        hinted = bool(group and ADDRESSED_HINT.search(text))
+        addressed = bool(not group or message.get("is_at") or callout or message.get("is_mentioned") or hinted)
         if group and not addressed:
             adaptive = self.adaptive(group)
             if adaptive:
                 message["message_info"]["additional_config"]["jinhua_adaptive"] = True
-            self.ctx.logger.info("金桦群消息入站 msg_id=%s 自适应=%s", message["message_id"], adaptive)
+            self.ctx.logger.info(
+                "金桦群消息入站 msg_id=%s 自适应=%s 判定=%s",
+                message["message_id"], adaptive, "点名/在叫我" if addressed else "旁观",
+            )
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
         self.remember(session, turn)
         if text in {"闭嘴", "说话"} and not (self.admin(user, role) or alias == "张睿诚"):
@@ -508,6 +518,39 @@ class JinhuaPlugin(MaiBotPlugin):
         )
         return {"action": "continue"}
 
+
+    # QQ 客户端对 Unicode emoji 支持有限：新版、带 VS16 变体符、ZWJ 组合和肤色修饰
+    # 都会显示成方块。这里在出站前按 EMOJI_MODE 处理。
+    EMOJI_SAFE = set("\U0001F600\U0001F601\U0001F602\U0001F603\U0001F604\U0001F605\U0001F60A"
+                     "\U0001F609\U0001F60E\U0001F62D\U0001F621\U0001F44D\U0001F44E"
+                     "\U0001F64F\U0001F525\U0001F480\u2728\u2764")
+    EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF),
+                    (0xFE00, 0xFE0F), (0x200D, 0x200D), (0x1F3FB, 0x1F3FF))
+
+    def sanitize_emoji(self, segments) -> int:
+        mode = (os.environ.get("EMOJI_MODE") or "safe").strip().lower()
+        if mode == "all":
+            return 0
+        dropped = [0]
+
+        def clean(text: str) -> str:
+            out = []
+            for ch in text:
+                code = ord(ch)
+                if any(lo <= code <= hi for lo, hi in self.EMOJI_RANGES):
+                    if mode == "strip" or ch not in self.EMOJI_SAFE:
+                        dropped[0] += 1
+                        continue
+                out.append(ch)
+            return "".join(out)
+
+        for seg in segments:
+            if seg.get("type") == "text" and isinstance(seg.get("data"), str):
+                cleaned = clean(seg["data"])
+                if cleaned != seg["data"]:
+                    seg["data"] = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+        return dropped[0]
+
     @HookHandler("send_service.before_send", mode=HookMode.BLOCKING)
     async def before_send(self, **kwargs):
         message = kwargs["message"]
@@ -538,6 +581,15 @@ class JinhuaPlugin(MaiBotPlugin):
         if turn.group and not turn.explicit and not self.adaptive(turn.group):
             return abort("当前群处于仅点名或静默时段")
         segments = message.get("raw_message", [])
+        try:
+            dropped = self.sanitize_emoji(segments)
+        except Exception:
+            dropped = 0
+        if dropped:
+            try:
+                self.ctx.logger.info("金桦出站清理不兼容表情 %d 个 mode=%s", dropped, os.environ.get("EMOJI_MODE") or "safe")
+            except Exception:
+                pass
         media = sum(seg.get("type") in {"image", "emoji"} for seg in segments)
         if media and (not policy.get("media", True) or turn.media + media > 1):
             return abort("媒体关闭或本轮已发过图片")

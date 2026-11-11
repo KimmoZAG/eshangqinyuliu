@@ -337,12 +337,8 @@ class JinhuaPlugin(MaiBotPlugin):
             elif name == "reply":
                 properties = function.get("parameters", {}).get("properties", {})
                 properties.pop("attach_pic", None)
-                if not policy.get("media", True):
-                    properties.pop("attach_emoji", None)
-                elif "attach_emoji" in properties:
-                    emoji = properties["attach_emoji"]
-                    emoji["description"] = "按情绪或画面从已审核表情库选一张。只有表情能补充这句回复时才填写。"
-                    emoji["anyOf"] = [form for form in emoji["anyOf"] if "msg_id" not in form.get("properties", {})]
+                # 没有审核过的表情库：上游解析 attach_emoji 会抛 ValueError，整条回复被丢弃
+                properties.pop("attach_emoji", None)
             tools.append(tool)
         kwargs["tool_definitions"] = tools
         self.active_tools[session] = (turn.anchor, {tool["function"]["name"] for tool in tools})
@@ -400,9 +396,7 @@ class JinhuaPlugin(MaiBotPlugin):
                     args.pop("attach_pic", None)
                     if not re.search(r"@\S|(?:请|帮我)\s*(?:提及|提醒|叫)(?:一下)?\s*\S", turn.text):
                         args.pop("attach_at", None)
-                    emoji = args.get("attach_emoji")
-                    if not self.state.policy(turn.group).get("media", True) or isinstance(emoji, dict) and "msg_id" in emoji:
-                        args.pop("attach_emoji", None)
+                    args.pop("attach_emoji", None)
             accepted.append(item)
         kwargs["output_items"] = accepted
         if turn.group and not turn.explicit:

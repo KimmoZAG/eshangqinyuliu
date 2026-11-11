@@ -29,7 +29,7 @@ export function commandOf(text) {
 define('help', {
   aliases: ['帮助', '菜单'],
   handler: () => ({
-    lines: ['能用的：绑定 码、/战绩 人、/开黑报名、/话题（管理）、/闭嘴 和 /说话（管理）'],
+    lines: ['能用的：绑定 码、/战绩 人、/开黑报名、/话题（管理）、/暧昧 开或关（管理）、/闭嘴 和 /说话（管理）'],
   }),
 });
 
@@ -81,6 +81,16 @@ define('说话', {
   handler: ({ group }) => {
     patchGroupConfig(group, { features: { interject: true } });
     return { lines: ['那我可就不客气了。'] };
+  },
+});
+
+define('暧昧', {
+  aliases: ['撩'],
+  perm: 'admin',
+  handler: ({ group, arg }) => {
+    const off = /关|off|0|停|别/.test(String(arg || ''));
+    patchGroupConfig(group, { features: { flirt: !off } });
+    return { lines: [off ? '行 我收着点 不撩了' : '行 那我可就不客气了'] };
   },
 });
 

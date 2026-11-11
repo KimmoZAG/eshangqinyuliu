@@ -96,6 +96,7 @@ const DEFAULTS = {
     reply: true, interject: true, topic: true,
     tools: num('DATA_TOOLS_ENABLED', num('SEARCH_ENABLED', 1)) === 1,
     search: num('SEARCH_ENABLED', 0) === 1,
+    flirt: num('FLIRT_ENABLED', 1) === 1,
   },
   interjectP: num('INTERJECT_P', 0.35),
   quiet: [num('QUIET_START', 2), num('QUIET_END', 8)],

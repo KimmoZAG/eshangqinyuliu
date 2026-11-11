@@ -224,8 +224,9 @@ export async function composeReply({
   ]);
   const member = members.get(uid);
   const relationship = member?.verified && member.name === ALIASES.zrc;
+  const crush = member?.verified && member.name === ALIASES.lhw && cfg.features?.flirt !== false;
   const scene = SUPPORT.test(message) ? 'support' : structured && hasLookup ? 'facts'
-    : interject ? 'interject' : relationship ? 'close' : 'chat';
+    : interject ? 'interject' : relationship ? 'close' : crush ? 'flirt' : 'chat';
   const available = !structured || items.some((item) => item.status === 'chat' || item.status === 'evidence');
   let output = '';
   let error;

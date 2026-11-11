@@ -371,6 +371,10 @@ class JinhuaPlugin(MaiBotPlugin):
         session = kwargs["session_id"]
         turn = self.planning_turn(session)
         if turn is None:
+            try:
+                self.ctx.logger.warning("金桦planner 未找到回合 session=%s（工具未过滤）", str(session)[:16])
+            except Exception:
+                pass
             return {"action": "continue"}
         for output in evidence_outputs(kwargs["items"]):
             anchored = self.get_turn(session, output["anchor"])
@@ -439,6 +443,11 @@ class JinhuaPlugin(MaiBotPlugin):
                     "即使换了话题或没重复你的原话，也算在和你续聊。用 reply，msg_id 选这条新消息。"
                     "群友互聊、对全群广播，或只是在谈论金桦时，用 stop。先认清对象，再决定是否查工具或回复。"
                 )
+            if turn.explicit:
+                hint += (
+                    "\n对方明确在叫你（@ 或直接叫了名字）。这一轮必须调用 reply 工具回一句，"
+                    "不要只输出文本，也不要选 stop 或 wait；不知道说什么就顺着上一句接一句短的。"
+                )
             if lookup_items and "jinhua_lookup" in allowed:
                 hint += "\n下列查询项的 text 保留原句，别改写。" + " / ".join(lookup_items)
             if turn.topic:
@@ -482,7 +491,13 @@ class JinhuaPlugin(MaiBotPlugin):
         kwargs["output_items"] = accepted
         if turn.group and not turn.explicit:
             actions = [item["tool_call"]["func_name"] for item in accepted if item.get("item_type") == "FunctionCallItem"]
-            self.ctx.logger.info("金桦接话判断 msg_id=%s action=%s", anchor, ",".join(actions) or "none")
+            try:
+                self.ctx.logger.info(
+                    "金桦接话判断 msg_id=%s action=%s explicit=%s",
+                    anchor, ",".join(actions) or "none", getattr(turn, "explicit", "?"),
+                )
+            except Exception:
+                pass
         return {"action": "continue", "modified_kwargs": kwargs}
 
     @HookHandler("maisaka.replyer.before_request", mode=HookMode.BLOCKING)
@@ -654,12 +669,22 @@ class JinhuaPlugin(MaiBotPlugin):
             )
             turn = newest
 
-        if now >= turn.expires_ms:
+        # 平台被动窗口是 5 分钟，自己设的预算只作提示，别因为慢了几秒就丢掉已经生成好的回复
+        hard_deadline = turn.received_ms + 120_000
+        if now >= hard_deadline:
             self.ctx.logger.warning(
-                "金桦出站已超时 msg_id=%s elapsed_ms=%s budget_ms=%s over_ms=%s",
-                anchor, now - turn.received_ms, BUDGET_MS[turn.mode], now - turn.expires_ms,
+                "金桦出站放弃 msg_id=%s elapsed_ms=%s（超过 120s 硬上限）",
+                anchor, now - turn.received_ms,
             )
-            return abort("当前回合已经超时")
+            return abort("回合超过硬上限")
+        if now >= turn.expires_ms:
+            try:
+                self.ctx.logger.warning(
+                    "金桦出站超预算但仍发送 elapsed_ms=%s budget_ms=%s",
+                    now - turn.received_ms, BUDGET_MS[turn.mode],
+                )
+            except Exception:
+                pass
         policy = self.state.policy(turn.group)
         if turn.group and not turn.explicit and not self.adaptive(turn.group):
             return abort("当前群处于仅点名或静默时段")

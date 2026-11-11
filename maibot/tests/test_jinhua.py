@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from jinhua.state import State
@@ -207,6 +207,7 @@ class InstalledUpstreamTests(unittest.IsolatedAsyncioTestCase):
         policy = {"quiet": [0, 0]}
         plugin = SimpleNamespace(
             state=SimpleNamespace(policy=lambda _: policy, name=lambda _: ""), active_tools={}, registrations={},
+            ctx=SimpleNamespace(logger=Mock()),
         )
         turns = {}
         plugin.remember = lambda session, turn: turns.update({(session, turn.anchor): turn})

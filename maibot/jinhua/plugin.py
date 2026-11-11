@@ -74,6 +74,7 @@ class JinhuaPlugin(MaiBotPlugin):
         self.latest: dict[str, str] = {}
         self.active_tools: dict[str, tuple[str, set[str]]] = {}
         self.registrations: dict[tuple[str, str], int] = {}
+        self.ctx.logger.info("金桦自适应接话已加载，可按 msg_id 追踪入站、判断和发送")
 
     async def on_unload(self) -> None:
         self.turns.clear()
@@ -172,8 +173,11 @@ class JinhuaPlugin(MaiBotPlugin):
             message["is_at"] = True
         session = message["session_id"]
         addressed = bool(not group or message.get("is_at") or callout or message.get("is_mentioned"))
-        if group and not addressed and self.adaptive(group):
-            message["message_info"]["additional_config"]["jinhua_adaptive"] = True
+        if group and not addressed:
+            adaptive = self.adaptive(group)
+            if adaptive:
+                message["message_info"]["additional_config"]["jinhua_adaptive"] = True
+            self.ctx.logger.info("金桦群消息入站 msg_id=%s 自适应=%s", message["message_id"], adaptive)
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
         self.remember(session, turn)
         if text in {"闭嘴", "说话"} and not (self.admin(user, role) or alias == "张睿诚"):
@@ -351,12 +355,12 @@ class JinhuaPlugin(MaiBotPlugin):
             )
             if ordinary:
                 hint += (
-                    "\n自适应接话：结合最近几轮，判断新消息是不是在对金桦说话。"
-                    "同一个人接着回应、反驳、追问或补充你刚说的话，即使没喊名字也要接。"
-                    "例如你刚说『给你记一功』，对方紧接着说『我不要记功，我要实在一点的』，"
-                    "这是在跟你继续聊，用 reply，msg_id 选这条新消息。"
-                    "群友互聊、转向别人、对全群广播，或只是在谈论金桦时，用 stop 结束本轮。"
-                    "先判断对方在和谁说话，只有对方在对你说话时才查工具或回复。"
+                    "\n自适应接话：结合最近几轮，判断新消息是不是在对金桦说话。先看这句话当前在叫谁。"
+                    "句首用其他人的称呼叫人，或明确 @、引用其他群友来对他说话，用 stop。"
+                    "即使这个人刚刚还在和你聊天，或你刚问过他想试哪句，也别替被点到的人答或复述他的话。"
+                    "如果上一句是你在回复这个人，对方接着用『你』『你的』回应、反驳、调侃或追问，"
+                    "即使换了话题或没重复你的原话，也算在和你续聊。用 reply，msg_id 选这条新消息。"
+                    "群友互聊、对全群广播，或只是在谈论金桦时，用 stop。先认清对象，再决定是否查工具或回复。"
                 )
             if lookup_items and "jinhua_lookup" in allowed:
                 hint += "\n下列查询项的 text 保留原句，别改写。" + " / ".join(lookup_items)
@@ -401,6 +405,9 @@ class JinhuaPlugin(MaiBotPlugin):
                         args.pop("attach_emoji", None)
             accepted.append(item)
         kwargs["output_items"] = accepted
+        if turn.group and not turn.explicit:
+            actions = [item["tool_call"]["func_name"] for item in accepted if item.get("item_type") == "FunctionCallItem"]
+            self.ctx.logger.info("金桦接话判断 msg_id=%s action=%s", anchor, ",".join(actions) or "none")
         return {"action": "continue", "modified_kwargs": kwargs}
 
     @HookHandler("maisaka.replyer.before_request", mode=HookMode.BLOCKING)
@@ -483,6 +490,7 @@ class JinhuaPlugin(MaiBotPlugin):
             return abort("金桦出站需要当前会话的入站锚点")
         now = int(time.time() * 1000)
         if now >= turn.expires_ms:
+            self.ctx.logger.info("金桦出站已超时 msg_id=%s elapsed_ms=%s", anchor, now - turn.received_ms)
             return abort("当前回合已经超时")
         policy = self.state.policy(turn.group)
         if turn.group and not turn.explicit and not self.adaptive(turn.group):
@@ -515,7 +523,12 @@ class JinhuaPlugin(MaiBotPlugin):
         message = kwargs["message"]
         anchor = message.get("reply_to") or kwargs.get("reply_message_id")
         turn = self.get_turn(message["session_id"], anchor) if anchor else None
-        if kwargs.get("sent") and turn and message.get("platform") == "qq":
+        if turn and message.get("platform") == "qq":
+            sent = bool(kwargs.get("sent"))
+            if turn.group and not turn.explicit:
+                self.ctx.logger.info("金桦接话发送 msg_id=%s sent=%s", anchor, sent)
+            if not sent:
+                return {"action": "continue"}
             turn.lines += 1
             turn.media += int(any(seg.get("type") in {"image", "emoji"} for seg in message.get("raw_message", [])))
             turn.handled = True

@@ -24,7 +24,8 @@ COMMANDS = {
 }
 # 没点名但在跟机器人说话：第二人称 + 不回/说话/在吗，或直接骂机器人
 ADDRESSED_HINT = re.compile(
-    r"(?:你|妳)[^。！？!?]{0,20}(?:不回|没回|不说话|说话|在吗|在不在|闭嘴|装死|哑了|死了|欠|机器人|\bAI\b)"
+    r"(?:你|妳)[^。！？!?]{0,20}(?:不回|没回|不说话|说话|在吗|在不在|人呢|在哪|闭嘴|装死|哑了|死了|欠|机器人|\bAI\b)"
+    r"|(?:人呢|在吗|在不在)[？?]?$"
 )
 
 SELF_TAG = re.compile(r"<@!?([^>\s]{6,})>")
@@ -204,7 +205,12 @@ class JinhuaPlugin(MaiBotPlugin):
         # 先按原始正文判定“是否在叫我”，再剥离 @ 标记后交给模型
         original = (message.get("processed_plain_text") or "").strip()
         tagged = bool(group and SELF_TAG.search(original))
-        callout = bool(group and (tagged or LEADING_CALLOUT.match(original)))
+        # 全量模式下 @ 是独立的 at 段，正文里既没有名字也没有标签
+        at_segment = any(
+            isinstance(seg, dict) and seg.get("type") == "at"
+            for seg in (message.get("raw_message") or [])
+        )
+        callout = bool(group and (tagged or at_segment or LEADING_CALLOUT.match(original)))
         text = command_text(message)
         text = SELF_TAG.sub("", text).strip()
         if original:

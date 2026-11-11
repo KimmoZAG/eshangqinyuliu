@@ -1,0 +1,366 @@
+diff --git a/src/maisaka/builtin_tool/context.py b/src/maisaka/builtin_tool/context.py
+index 1a5f6f1..cb81a6c 100644
+--- a/src/maisaka/builtin_tool/context.py
++++ b/src/maisaka/builtin_tool/context.py
+@@ -363,9 +363,19 @@ class BuiltinToolRuntimeContext:
+     @staticmethod
+     async def load_emoji_by_description(emotion: str, session_id: str, *, content: str = "") -> EmojiComponent:
+         from src.emoji_system.semantic_match import match_emoji_description
++        from src.config.config import config_manager
++        from src.emoji_system.emoji_manager import emoji_manager
+ 
+-        emoji_hash = await match_emoji_description(emotion, session_id, content=content)
+-        return await BuiltinToolRuntimeContext.load_emoji_attachment(emoji_hash)
++        if config_manager.get_model_config().model_task_config.embedding.model_list:
++            emoji_hash = await match_emoji_description(emotion, session_id, content=content)
++            return await BuiltinToolRuntimeContext.load_emoji_attachment(emoji_hash)
++        label = (emotion or content).strip()
++        selected = next((item for item in emoji_manager.emojis if (item.description or "").strip().casefold() == label.casefold()), None)
++        if selected is None and label:
++            selected = await emoji_manager.get_emoji_for_emotion(label)
++        if selected is None:
++            raise ValueError("当前已审核的表情库没有匹配的素材。")
++        return await BuiltinToolRuntimeContext.load_emoji_attachment(selected.file_hash)
+ 
+     @staticmethod
+     async def load_emoji_attachment(emoji_hash: str) -> EmojiComponent:
+diff --git a/src/plugin_runtime/capabilities/core.py b/src/plugin_runtime/capabilities/core.py
+index f05c7e3..c96e62b 100644
+--- a/src/plugin_runtime/capabilities/core.py
++++ b/src/plugin_runtime/capabilities/core.py
+@@ -433,6 +433,18 @@ class RuntimeCoreCapabilityMixin:
+             result["error"] = error
+         return result
+ 
++    @staticmethod
++    def _plugin_reply_anchor(args: Dict[str, Any], stream_id: str):
++        raw = args.get("reply_message")
++        if raw is None:
++            return None
++        from src.plugin_runtime.host.message_utils import PluginMessageUtils
++
++        anchor = PluginMessageUtils._build_session_message_from_dict(raw)
++        if anchor.session_id != stream_id:
++            raise ValueError("被动回复锚点不属于目标会话")
++        return anchor
++
+     async def _cap_send_text(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:
+         """向指定流发送文本消息。
+ 
+@@ -460,6 +472,7 @@ class RuntimeCoreCapabilityMixin:
+                 stream_id=stream_id,
+                 typing=bool(args.get("typing", False)),
+                 set_reply=bool(args.get("set_reply", False)),
++                reply_message=self._plugin_reply_anchor(args, stream_id),
+                 storage_message=bool(args.get("storage_message", True)),
+                 sync_to_maisaka_history=sync_to_maisaka_history,
+                 maisaka_source_kind=maisaka_source_kind,
+@@ -494,6 +507,7 @@ class RuntimeCoreCapabilityMixin:
+             sent_message = await send_api.emoji_to_stream_with_message(
+                 emoji_base64=emoji_base64,
+                 stream_id=stream_id,
++                reply_message=self._plugin_reply_anchor(args, stream_id),
+                 storage_message=bool(args.get("storage_message", True)),
+                 sync_to_maisaka_history=sync_to_maisaka_history,
+                 maisaka_source_kind=maisaka_source_kind,
+@@ -528,6 +542,7 @@ class RuntimeCoreCapabilityMixin:
+             sent_message = await send_api.image_to_stream_with_message(
+                 image_base64=image_base64,
+                 stream_id=stream_id,
++                reply_message=self._plugin_reply_anchor(args, stream_id),
+                 storage_message=bool(args.get("storage_message", True)),
+                 sync_to_maisaka_history=sync_to_maisaka_history,
+                 maisaka_source_kind=maisaka_source_kind,
+diff --git a/src/plugin_runtime/capabilities/data.py b/src/plugin_runtime/capabilities/data.py
+index 77f900c..d094a23 100644
+--- a/src/plugin_runtime/capabilities/data.py
++++ b/src/plugin_runtime/capabilities/data.py
+@@ -632,7 +632,12 @@ class RuntimeDataCapabilityMixin:
+             return {"success": False, "error": "缺少必要参数 description"}
+ 
+         try:
+-            emoji = await emoji_manager.get_emoji_for_emotion(description)
++            if args.get("exact"):
++                title = description.strip().casefold()
++                emoji = next((item for item in emoji_manager.emojis
++                              if (item.description or "").strip().casefold() == title), None)
++            else:
++                emoji = await emoji_manager.get_emoji_for_emotion(description)
+             if emoji is None:
+                 return {"success": True, "emoji": None}
+             serialized = self._serialize_emoji_payload(emoji)
+diff --git a/src/plugins/built_in/qq_official_adapter/codec.py b/src/plugins/built_in/qq_official_adapter/codec.py
+index 851a240..429f066 100644
+--- a/src/plugins/built_in/qq_official_adapter/codec.py
++++ b/src/plugins/built_in/qq_official_adapter/codec.py
+@@ -77,6 +77,8 @@ def decode_message(
+     else:
+         additional_config["platform_io_target_user_id"] = unified_user or user_id
+     additional_config["qq_official_user_openid"] = user_id
++    if is_group and author.get("member_role") in ("owner", "admin"):
++        additional_config["qq_official_member_role"] = author["member_role"]
+     # 官方引用索引（message_scene.ext 的 msg_idx）：出站 message_reference 只能用 REFIDX，
+     # 不能用消息 id（ROBOT1.0_...）；ref_msg_idx 表示用户这条消息本身引用了谁。
+     msg_idx, ref_msg_idx = extract_message_scene_fields(payload)
+@@ -389,6 +391,7 @@ def _tree_mentions_bot(value: Any, account_id: str) -> bool:
+ def encode_message(
+     message: Mapping[str, Any],
+     reverse_map: Optional[Mapping[str, Mapping[str, str]]] = None,
++    include_segment_indices: bool = False,
+ ) -> Tuple[str, str, List[Dict[str, Any]], str]:
+     """提取出站目标并按原顺序切分为待发送的消息部分；不默默丢弃未支持的消息段。
+ 
+@@ -425,6 +428,7 @@ def encode_message(
+         raise ValueError("出站消息缺少消息段")
+     outbound: List[Dict[str, Any]] = []
+     parts: List[str] = []
++    text_indices: List[int] = []
+     use_markdown = False
+     reply_target_id = ""
+ 
+@@ -433,11 +437,17 @@ def encode_message(
+         text = "".join(parts).strip()
+         if text:
+             body = {"msg_type": 2, "markdown": {"content": text}} if use_markdown else {"msg_type": 0, "content": text}
+-            outbound.append({"kind": "body", "body": body})
++            add_part({"kind": "body", "body": body}, text_indices[:])
+         parts.clear()
++        text_indices.clear()
+         use_markdown = False
+ 
+-    for segment in segments:
++    def add_part(part: Dict[str, Any], indices: List[int]) -> None:
++        if include_segment_indices:
++            part["segment_indices"] = indices
++        outbound.append(part)
++
++    for index, segment in enumerate(segments):
+         if not isinstance(segment, Mapping):
+             raise ValueError("出站消息段格式无效")
+         # SDK send.custom("video", ...) 经宿主序列化为 dict 包装，保留明确的视频类型。
+@@ -469,23 +479,25 @@ def encode_message(
+             at_openid = str((reverse_map or {}).get("user", {}).get(at_user_id) or at_user_id)
+             if at_openid and not at_openid.isdigit():
+                 parts.append(f'<qqbot-at-user id="{at_openid}" /> ')
++                text_indices.append(index)
+                 use_markdown = True
+             elif at_nickname:
+                 # 纯数字是未绑定 OpenID 的 QQ 号，无法 @，退化为可读 @昵称。
+                 parts.append(f"@{at_nickname} ")
++                text_indices.append(index)
+             continue
+         if segment.get("type") in {"image", "emoji"}:
+             _flush_text()
+-            outbound.append({"kind": "media", "file_type": 1, **_decode_image_segment(segment)})
++            add_part({"kind": "media", "file_type": 1, **_decode_image_segment(segment)}, [index])
+             continue
+         if segment.get("type") == "voice":
+             _flush_text()
+-            outbound.append({"kind": "media", "file_type": 3, **_decode_voice_segment(segment)})
++            add_part({"kind": "media", "file_type": 3, **_decode_voice_segment(segment)}, [index])
+             continue
+         if segment.get("type") in {"file", "video"}:
+             _flush_text()
+             file_type = 2 if segment["type"] == "video" else 4
+-            outbound.append({"kind": "media", "file_type": file_type, **_decode_file_segment(segment)})
++            add_part({"kind": "media", "file_type": file_type, **_decode_file_segment(segment)}, [index])
+             continue
+         if segment.get("type") != "text":
+             raise ValueError(f"出站暂不支持 {segment.get('type')} 消息段，仅支持文本、@、图片、表情、语音、视频与文件")
+@@ -493,6 +505,7 @@ def encode_message(
+         if not isinstance(data, str):
+             raise ValueError("出站文本段的数据必须是字符串")
+         parts.append(data)
++        text_indices.append(index)
+     _flush_text()
+     if not outbound:
+         raise ValueError("出站消息为空")
+diff --git a/src/plugins/built_in/qq_official_adapter/plugin.py b/src/plugins/built_in/qq_official_adapter/plugin.py
+index b00ff5f..ae3a237 100644
+--- a/src/plugins/built_in/qq_official_adapter/plugin.py
++++ b/src/plugins/built_in/qq_official_adapter/plugin.py
+@@ -1484,7 +1484,8 @@ class QQOfficialAdapterPlugin(MaiBotPlugin):
+         del route, metadata, kwargs
+         if not self._ready:
+             return {"success": False, "error": "QQ 官方消息网关未就绪"}
+-        sent_ids: List[str] = []
++        parts: List[Dict[str, Any]] = []
++        receipts: List[Dict[str, Any]] = []
+         try:
+             # 统一 ID 反查回 OpenID 后才能调用官方 API
+             reverse_map = {kind: {v: k for k, v in mapping.items()} for kind, mapping in self._id_map.items()}
+@@ -1495,7 +1496,7 @@ class QQOfficialAdapterPlugin(MaiBotPlugin):
+                 reverse_map["user"] = {value: key for key, value in self._group_user_map(group_openid).items()}
+             # 媒体 Base64 解码和内容哈希放在线程池，避免大段语音占住网关事件循环。
+             scene, target, parts, reply_target_id = await asyncio.to_thread(
+-                encode_message, message, reverse_map=reverse_map
++                encode_message, message, reverse_map=reverse_map, include_segment_indices=True
+             )
+             # 被动回复窗口按入站记录的统一 ID 匹配（encode 返回的 target 已反查为 OpenID）。
+             route_target = self._id_map.get("group" if scene == "group" else "user", {}).get(target, target)
+@@ -1507,6 +1508,9 @@ class QQOfficialAdapterPlugin(MaiBotPlugin):
+             base_path = f"/v2/{'groups' if scene == 'group' else 'users'}/{quote(target, safe='')}"
+             # 官方一条消息只承载一种内容，文本与各类媒体按原顺序逐条发送。
+             for index, part in enumerate(parts):
++                passive_fields = await self._claim_passive_fields(scene, route_target, reply_to)
++                if not passive_fields:
++                    raise ValueError("QQ 被动回复缺少有效入站锚点或额度")
+                 if part["kind"] == "media":
+                     binary = (
+                         await self._download_outbound_file(part["file_url"], part["file_size"])
+@@ -1515,7 +1519,7 @@ class QQOfficialAdapterPlugin(MaiBotPlugin):
+                     file_info = await self._upload_media(
+                         base_path, binary, part["file_name"], file_type=part["file_type"]
+                     )
+-                    body: Dict[str, Any] = {"msg_type": 7, "media": {"file_info": file_info}}
++                    body: Dict[str, Any] = {"msg_type": 7, "content": " ", "media": {"file_info": file_info}}
+                 else:
+                     body = part["body"]
+                 # 引用样式只挂在第一条分片；message_reference 与被动凭证 msg_id/msg_seq 互不替代。
+@@ -1534,9 +1538,6 @@ class QQOfficialAdapterPlugin(MaiBotPlugin):
+                     self.ctx.logger.debug(
+                         "QQ 官方出站缺少引用索引，消息不携带 message_reference: target=%s", quote_target
+                     )
+-                passive_fields = await self._claim_passive_fields(scene, route_target, reply_to)
+-                if not passive_fields:
+-                    passive_fields = self._proactive_fields()
+                 result = await self._api_post(
+                     f"{base_path}/messages", {**body, **reference_fields, **passive_fields}
+                 )
+@@ -1548,13 +1549,29 @@ class QQOfficialAdapterPlugin(MaiBotPlugin):
+                         "QQ 官方消息已携带引用: message_reference=%s",
+                         reference_fields["message_reference"]["message_id"],
+                     )
+-                sent_ids.append(str(result["id"]))
+-            return {"success": True, "external_message_id": sent_ids[0]}
++                receipts.append({
++                    "status": "sent",
++                    "id": str(result["id"]),
++                    "kind": part["kind"],
++                    "segment_indices": part["segment_indices"],
++                    "visible_text": (body.get("content", "") if body["msg_type"] == 0
++                                     else body.get("markdown", {}).get("content", "")),
++                    "quoted": bool(reference_fields),
++                })
+         except Exception as exc:
+-            if sent_ids:
+-                exc = RuntimeError(f"已发送 {len(sent_ids)} 条后失败: {exc}")
+             self.ctx.logger.warning("QQ 官方消息发送失败: %s", exc)
+-            return {"success": False, "error": str(exc)}
++            metadata = {"qq_official_parts": receipts + [
++                {"status": "failed", "segment_indices": part["segment_indices"]}
++                if index == len(receipts) else {"status": "skipped", "segment_indices": part["segment_indices"]}
++                for index, part in enumerate(parts) if index >= len(receipts)
++            ]}
++            if not receipts:
++                return {"success": False, "error": str(exc), "metadata": metadata}
++            return {"success": True, "external_message_id": receipts[0]["id"], "metadata": metadata}
++        return {
++            "success": True, "external_message_id": receipts[0]["id"],
++            "metadata": {"qq_official_parts": receipts},
++        }
+ 
+     def _store_ref_idx(
+         self,
+diff --git a/src/services/send_service.py b/src/services/send_service.py
+index a285f9d..3f3d0f6 100644
+--- a/src/services/send_service.py
++++ b/src/services/send_service.py
+@@ -712,6 +712,35 @@ async def _store_sent_message(message: SessionMessage) -> None:
+     await MessageUtils.store_message_to_db_async(message)
+ 
+ 
++def _qq_delivered_fragments(message: SessionMessage, batch: DeliveryBatch) -> Optional[List[SessionMessage]]:
++    for receipt in batch.receipts:
++        parts = receipt.metadata.get("qq_official_parts")
++        if not (receipt.driver_id or "").endswith(":qq_official_gateway") or not isinstance(parts, list):
++            continue
++        delivered: List[SessionMessage] = []
++        original = message.raw_message.components
++        for part in parts:
++            if part.get("status") != "sent" or not part.get("id"):
++                continue
++            selected = [deepcopy(original[index]) for index in part["segment_indices"]]
++            fragment = deepcopy(message)
++            fragment.raw_message = MessageSequence(components=selected)
++            fragment.processed_plain_text = _build_processed_plain_text(fragment).strip()
++            if part["kind"] == "body" and all(isinstance(component, TextComponent) for component in selected):
++                fragment.processed_plain_text = part["visible_text"]
++                fragment.raw_message = MessageSequence(components=[TextComponent(text=part["visible_text"])])
++            if part["quoted"]:
++                fragment.raw_message.components[:0] = [
++                    deepcopy(component) for component in original if isinstance(component, ReplyComponent)
++                ]
++            fragment.message_id = fragment.platform_message_id = part["id"]
++            flags = _detect_outbound_message_flags(fragment.raw_message)
++            fragment.is_emoji, fragment.is_picture = flags["is_emoji"], flags["is_picture"]
++            delivered.append(fragment)
++        return delivered
++    return None
++
++
+ async def _apply_successful_delivery_receipt(message: SessionMessage, delivery_batch: DeliveryBatch) -> None:
+     """将成功回执中的平台消息 ID 回填到内部消息。
+ 
+@@ -855,6 +884,7 @@ async def _send_via_platform_io(
+     storage_message: bool,
+     show_log: bool,
+     raise_on_hook_abort: bool = False,
++    sent_fragments: Optional[List[SessionMessage]] = None,
+ ) -> Optional[SessionMessage]:
+     """通过 Platform IO 发送消息。
+ 
+@@ -922,6 +952,26 @@ async def _send_via_platform_io(
+         logger.error(f"[SendService] Platform IO 发送异常: {exc}", exc_info=True)
+         return None
+ 
++    qq_fragments = _qq_delivered_fragments(message, delivery_batch)
++    if qq_fragments is not None:
++        if not qq_fragments:
++            _log_platform_io_failures(delivery_batch)
++            return None
++        for fragment in qq_fragments:
++            if sent_fragments is not None:
++                sent_fragments.append(fragment)
++            await _invoke_send_hook(
++                "send_service.after_send", fragment, sent=True, typing=typing,
++                set_reply=set_reply, reply_message_id=reply_message_id,
++                storage_message=storage_message, show_log=show_log,
++            )
++            if fragment.is_emoji:
++                await asyncio.to_thread(_record_sent_emoji_usage, fragment)
++            if storage_message:
++                await _store_sent_message(fragment)
++            await _notify_memory_automation_on_message_sent(fragment)
++        return qq_fragments[0]
++
+     sent = bool(delivery_batch.has_success)
+     if sent:
+         await _apply_successful_delivery_receipt(message, delivery_batch)
+@@ -994,6 +1044,7 @@ async def send_session_message_with_message(
+         logger.error("[SendService] 消息缺少 message_id，无法发送")
+         raise ValueError("消息缺少 message_id，无法发送")
+ 
++    sent_fragments: List[SessionMessage] = []
+     sent_message = await _send_via_platform_io(
+         message,
+         typing=typing,
+@@ -1003,12 +1054,14 @@ async def send_session_message_with_message(
+         storage_message=storage_message,
+         show_log=show_log,
+         raise_on_hook_abort=raise_on_hook_abort,
++        sent_fragments=sent_fragments,
+     )
+     if sent_message is not None and sync_to_maisaka_history:
+-        _sync_sent_message_to_maisaka_history(
+-            sent_message,
+-            source_kind=str(maisaka_source_kind or "outbound_send"),
+-        )
++        for fragment in sent_fragments or [sent_message]:
++            _sync_sent_message_to_maisaka_history(
++                fragment,
++                source_kind=str(maisaka_source_kind or "outbound_send"),
++            )
+     return sent_message
+ 
+ 

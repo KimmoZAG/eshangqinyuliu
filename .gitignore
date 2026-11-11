@@ -1,6 +1,7 @@
 # 密钥与配置
 .env
 .env.local
+config/mcp.local.json
 
 # 运行时数据（含群消息、画像、trace）
 data/
@@ -8,5 +9,7 @@ logs/
 
 # 依赖与临时文件
 node_modules/
+__pycache__/
+*.pyc
 *.log
 .DS_Store

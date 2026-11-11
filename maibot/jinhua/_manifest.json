@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "id": "jinhua.chat",
+  "name": "金桦群聊扩展",
+  "version": "1.0.0",
+  "description": "金桦的人物关系、群命令、事实回复校验和 QQ 送达约束。",
+  "author": {
+    "name": "鹅上青玉柳",
+    "url": "https://github.com/KimmoZAG"
+  },
+  "license": "UNLICENSED",
+  "urls": {"repository": "https://github.com/KimmoZAG/eshangqinyuliu"},
+  "host_application": {
+    "min_version": "1.4.3",
+    "max_version": "1.4.3"
+  },
+  "sdk": {
+    "min_version": "2.22.1",
+    "max_version": "2.98.99"
+  },
+  "dependencies": [],
+  "capabilities": ["send.text", "send.image", "send.emoji", "emoji.get_by_description"],
+  "i18n": {"default_locale": "zh-CN", "supported_locales": ["zh-CN"]}
+}

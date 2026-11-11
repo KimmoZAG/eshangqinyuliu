@@ -270,14 +270,14 @@ test('自报昵称只用于称呼，已绑定的成员同时用于熟人语气�
   const { prompts, sent } = fixture(t, () => '@zrc 你来一下');
   await handleEvent(group('directory', 'nickname', '我到啦', { author: selfNamed }));
   assert.equal(sent[0].content, '@zrc 你来一下');
-  assert.doesNotMatch(prompts[0].request.messages[0].content, /对诚哥比对其他人软一点/);
+  assert.doesNotMatch(prompts[0].request.messages[0].content, /他是张睿诚，你的话以他为准/);
 
   setNickname(bound, '旧称呼');
   saveAlias(bound, '张睿诚');
   assert.equal(setNickname(bound, '后来自报的称呼'), '张睿诚');
   await handleEvent(group('directory', 'bound', '我到啦', { author: bound }));
   assert.equal(sent[1].markdown.content, '<qqbot-at-user id="' + bound + '" /> 你来一下');
-  assert.match(prompts[1].request.messages[0].content, /对诚哥比对其他人软一点/);
+  assert.match(prompts[1].request.messages[0].content, /他是张睿诚，你的话以他为准/);
   assert.equal(prompts[1].input.speaker, '张睿诚');
   assert.equal(memory.recentSelf('directory').at(-1), '@张睿诚 你来一下');
 });
@@ -423,7 +423,7 @@ test('同群慢回复不挡住后到的 @，两条消息按各自 msg_id 回', a
   assert.deepEqual(sent.map(({ content }) => content), ['接到了 先回我的', '接到了 等我的这条']);
 });
 
-test('MCP 子进程无法启动时，LoL 直连适配器仍能按联赛筛赛程', async (t) => {
+test('MCP 子进程无法启动时，LoL 直连适配器仍能查赛程和录像', async (t) => {
   writeJson(join(DIRS.config, 'mcp.json'), [{
     name: 'offline-lol', domain: 'lol',
     command: join(scratch, 'missing-executable'), initTimeoutMs: 200,
@@ -436,9 +436,21 @@ test('MCP 子进程无法启动时，LoL 直连适配器仍能按联赛筛赛程
     startTime: '2026-11-10T11:00:00Z', state: 'unstarted',
     league: { name: league }, match: { id: String(index + 1), teams: [{ name: league + ' 甲' }, { name: league + ' 乙' }] },
   }));
-  t.mock.method(globalThis, 'fetch', async () => Response.json({ data: { schedule: { events } } }));
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    if (url.pathname.endsWith('/getSchedule')) return Response.json({ data: { schedule: { events } } });
+    assert.equal(url.pathname.split('/').at(-1), 'getEventDetails');
+    assert.equal(url.searchParams.get('id'), '1');
+    return Response.json({ data: { event: { match: { games: [{ vods: [
+      { provider: 'youtube', parameter: 'test-video', locale: 'en-US' },
+      { provider: 'youtube', parameter: 'test-video', locale: 'en-US' },
+      { provider: 'youtube', parameter: 'bad&extra=value' },
+    ] }] } } } });
+  });
   const result = await callTool('lol_matches_by_date', { league: 'LPL', date: '2026-11-10' });
   assert.equal(result.ok, true);
   assert.equal(result.result.count, 1);
   assert.equal(result.result.matches[0].league, 'LPL');
+  const vods = await callTool('lol_event_vods', { event_id: '1' });
+  assert.equal(vods.ok, true);
+  assert.deepEqual(vods.result.vods, [{ provider: 'youtube', locale: 'en-US', url: 'https://www.youtube.com/watch?v=test-video' }]);
 });

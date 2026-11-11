@@ -1,0 +1,16 @@
+[
+  {
+    "name": "hltv",
+    "enabled": false,
+    "domain": "hltv",
+    "command": "hltv-mcp",
+    "args": []
+  },
+  {
+    "name": "lol",
+    "enabled": false,
+    "domain": "lol",
+    "command": "node",
+    "args": ["./local/mcp-server-lol/dist/index.js"]
+  }
+]

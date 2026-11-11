@@ -73,6 +73,60 @@ async function charts(signal) {
 }
 
 export default function registerSteamAdapters(register) {
+  register('steam_find_game', {
+    domain: 'steam',
+    description: '按游戏名从 Steam 商店查找 app ID。',
+    schema: {
+      type: 'object', properties: { name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['name'],
+    },
+    ttlMs: 600_000,
+    call: async ({ name }, { signal }) => {
+      const query = new URLSearchParams({ term: name, l: 'schinese', cc: 'cn' });
+      const data = await fetchJson('https://store.steampowered.com/api/storesearch/?' + query, { signal });
+      if (!Array.isArray(data?.items)) throw Object.assign(new Error('Steam 搜索响应无效'), { code: 'upstream_unavailable' });
+      return data.items.filter((item) => item.type === 'app' && Number.isSafeInteger(item.id))
+        .slice(0, 8).map((item) => ({ appid: item.id, name: item.name }));
+    },
+  });
+
+  register('steam_game_price', {
+    domain: 'steam',
+    description: '按 app ID 查询 Steam 商店价格和折扣。',
+    schema: {
+      type: 'object',
+      properties: { appid: { type: 'integer', minimum: 1 }, country: { type: 'string', pattern: '^[a-zA-Z]{2}$' } },
+      required: ['appid'],
+    },
+    ttlMs: 120_000,
+    call: async ({ appid, country = 'cn' }, { signal }) => {
+      const data = await fetchJson(`${STORE}?appids=${appid}&l=schinese&cc=${country.toLowerCase()}`, { signal });
+      const game = data?.[appid]?.data;
+      if (!game?.name) throw Object.assign(new Error('此地区商店没有该游戏的数据'), { code: 'not_found' });
+      const price = game.price_overview;
+      return {
+        appid, name: game.name, country: country.toUpperCase(), free: game.is_free === true,
+        currency: price?.currency, current: price?.final_formatted, original: price?.initial_formatted,
+        discount_percent: price?.discount_percent, url: `https://store.steampowered.com/app/${appid}/`,
+      };
+    },
+  });
+
+  register('steam_game_reviews', {
+    domain: 'steam',
+    description: '按 app ID 查询 Steam 用户评价统计。',
+    schema: { type: 'object', properties: { appid: { type: 'integer', minimum: 1 } }, required: ['appid'] },
+    ttlMs: 300_000,
+    call: async ({ appid }, { signal }) => {
+      const data = await fetchJson(`https://store.steampowered.com/appreviews/${appid}?json=1&language=all&purchase_type=all&num_per_page=0`, { signal });
+      const result = data?.query_summary;
+      if (!result || data.success !== 1) throw Object.assign(new Error('Steam 评价不可用'), { code: 'upstream_unavailable' });
+      return {
+        appid, total: result.total_reviews, positive: result.total_positive, negative: result.total_negative,
+        rating: result.review_score_desc, url: `https://store.steampowered.com/app/${appid}/`,
+      };
+    },
+  });
+
   register('steam_most_played', {
     domain: 'steam',
     description:

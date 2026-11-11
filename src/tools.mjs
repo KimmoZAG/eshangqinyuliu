@@ -72,9 +72,15 @@ function matchesSchema(value, schema, strict = false) {
       } else if (strict && schema.properties) return false;
     }
   }
-  if (type === 'array' && schema.items && !value.every((item) => matchesSchema(item, schema.items, strict))) return false;
+  if (type === 'array') {
+    if (value.length < schema.minItems || value.length > schema.maxItems) return false;
+    if (schema.items && !value.every((item) => matchesSchema(item, schema.items, strict))) return false;
+  }
   if (type === 'number' && (!Number.isFinite(value) || value < schema.minimum || value > schema.maximum)) return false;
-  if (type === 'string' && (value.length < schema.minLength || value.length > schema.maxLength)) return false;
+  if (type === 'string') {
+    if (value.length < schema.minLength || value.length > schema.maxLength) return false;
+    if (schema.pattern && !new RegExp(schema.pattern, 'u').test(value)) return false;
+  }
   return true;
 }
 
@@ -84,13 +90,13 @@ export async function callTool(name, args, { signal, allowed, key: conversation 
 
   if (signal?.aborted) return { ok: false, code: 'timeout', error: '查询超时' };
   if (allowed && !allowed.has(name)) return { ok: false, code: 'tool_not_allowed', error: '当前问题不可用此工具' };
-  if (allowed && (!args || typeof args !== 'object' || Array.isArray(args) || !matchesSchema(args, t.schema, true))) {
+  if (!args || typeof args !== 'object' || Array.isArray(args) || !matchesSchema(args, t.schema, !!allowed)) {
     return { ok: false, code: 'bad_args', error: '参数不符合工具 schema' };
   }
   const key = `${name}:${JSON.stringify(args || {})}`;
   if (t.ttlMs > 0) {
     const hit = cache.get(key);
-    if (hit && Date.now() - hit.at < t.ttlMs) return { ok: true, result: hit.val, cached: true };
+    if (hit && Date.now() - hit.at < t.ttlMs) return { ok: true, result: hit.val, cached: true, fetchedAt: hit.at };
   }
 
   let listener;
@@ -101,8 +107,9 @@ export async function callTool(name, args, { signal, allowed, key: conversation 
     });
     let out = await (abort ? Promise.race([pending, abort]) : pending);
     if (typeof out === 'string' && out.length > TRUNCATE) out = `${out.slice(0, TRUNCATE)}…[已截断]`;
-    if (t.ttlMs > 0) cache.set(key, { at: Date.now(), val: out });
-    return { ok: true, result: out };
+    const fetchedAt = Date.now();
+    if (t.ttlMs > 0) cache.set(key, { at: fetchedAt, val: out });
+    return { ok: true, result: out, fetchedAt };
   } catch (e) {
     return { ok: false, error: e.message, code: signal?.aborted ? 'timeout' : e.code || 'tool_error' };
   } finally {
@@ -159,9 +166,9 @@ async function loadAdapters(cfg, client) {
   return loaded;
 }
 
-export async function startMcpServers() {
+export async function startMcpServers({ config, connectTimeoutMs } = {}) {
   const cfgFile = path.join(DIRS.config, 'mcp.json');
-  const servers = readJson(cfgFile, []);
+  const servers = config ?? readJson(cfgFile, []);
   if (!Array.isArray(servers) || !servers.length) {
     log('mcp', 'config/mcp.json 为空，只加载内置与 OP.GG 工具');
     return { servers: 0, tools: registry.size };
@@ -194,8 +201,8 @@ export async function startMcpServers() {
         timeoutMs: cfg.timeoutMs || 20_000,
       });
 
-      const info = await client.initialize({ timeout: cfg.initTimeoutMs || 60_000 });
-      const all = await client.listTools({ timeout: cfg.listTimeoutMs || 30_000 });
+      const info = await client.initialize({ timeout: Math.min(cfg.initTimeoutMs || 60_000, connectTimeoutMs ?? Infinity) });
+      const all = await client.listTools({ timeout: Math.min(cfg.listTimeoutMs || 30_000, connectTimeoutMs ?? Infinity) });
       clients.set(cfg.name, client);
 
       const allow = cfg.allow || null;

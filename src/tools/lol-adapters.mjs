@@ -65,7 +65,7 @@ const cut = (s, n = 60) => String(s || '').slice(0, n);
 function vodUrl(provider, param) {
   const p = String(provider || '').toLowerCase();
   const id = String(param || '').trim();
-  if (!id) return null;
+  if (!/^[\w-]+$/.test(id)) return null;
   if (p.includes('youtube')) return `https://www.youtube.com/watch?v=${id}`;
   if (p.includes('afreeca')) return `https://vod.afreecatv.com/player/${id}`;
   if (p.includes('twitch')) return `https://www.twitch.tv/videos/${id}`;
@@ -81,17 +81,23 @@ export default function registerLolAdapters(register, client) {
       type: 'object',
       properties: {
         team: { type: 'string', description: '队伍名，可只写一部分，如 T1 / BLG / FlyQuest' },
+        date: { type: 'string', description: '北京时间日期或 today / yesterday / tomorrow' },
+        league: { type: 'string' },
         state: { type: 'string', enum: ['upcoming', 'inProgress', 'completed', 'all'] },
         limit: { type: 'number' },
       },
     },
     ttlMs: 180_000,
-    call: async ({ team = '', state = 'all', limit = 8 }, { signal }) => {
+    call: async ({ team = '', date, league = '', state = 'all', limit = 8 }, { signal }) => {
       const j = await gw('getSchedule', { hl: 'zh-CN' }, signal);
       const events = j?.data?.schedule?.events || [];
       const t = String(team).toLowerCase();
+      const day = date && normDay(date);
       const rows = events
         .filter((e) => e?.match?.id)
+        .filter((e) => !day || shText(e.startTime).slice(0, 10) === day)
+        .filter((e) => !league || [e.league?.name, e.league?.slug].some((name) =>
+          String(name || '').toLowerCase() === league.toLowerCase()))
         .filter((e) => (state === 'all' ? true : e.state === state))
         .filter((e) => {
           if (!t) return true;
@@ -99,11 +105,13 @@ export default function registerLolAdapters(register, client) {
           const league = String(e.league?.name || '').toLowerCase();
           return names.includes(t) || league.includes(t);
         })
-        .slice(0, limit)
+        .sort((a, b) => state === 'completed' ? Date.parse(b.startTime) - Date.parse(a.startTime)
+          : Date.parse(a.startTime) - Date.parse(b.startTime))
+        .slice(0, Math.min(Math.max(limit, 1), 12))
         .map((e) => ({
           event_id: e.match.id,
           teams: (e.match.teams || []).map((x) => x.name).filter(Boolean),
-          start_time: e.startTime,
+          start_time: shText(e.startTime),
           state: e.state,
           league: e.league?.name || '',
           block: e.blockName || '',
@@ -272,8 +280,6 @@ export default function registerLolAdapters(register, client) {
     },
   });
 
-  if (!client) return;
-
   register('lol_event_vods', {
     domain: 'lol',
     description: '查某场比赛的 VOD 可点链接。需要先用 lol_resolve_event 拿到 event_id。',
@@ -284,6 +290,19 @@ export default function registerLolAdapters(register, client) {
     },
     ttlMs: 3_600_000,
     call: async ({ event_id }, { signal }) => {
+      if (!client) {
+        const data = await gw('getEventDetails', { hl: 'zh-CN', id: event_id }, signal);
+        const games = data?.data?.event?.match?.games;
+        if (!Array.isArray(games)) throw Object.assign(new Error('该场次没有 VOD 或 event_id 无效'), { code: 'not_found' });
+        const links = new Map();
+        for (const game of games) {
+          for (const vod of game?.vods || []) {
+            const url = vodUrl(vod.provider, vod.parameter);
+            if (url && !links.has(url)) links.set(url, { provider: vod.provider, locale: vod.locale, url });
+          }
+        }
+        return { event_id, count: links.size, vods: [...links.values()].slice(0, 8) };
+      }
       let text;
       try {
         const r = await client.callTool('get-match-vods', { eventId: event_id, language: 'zh-CN' }, { timeout: 60_000, signal });
@@ -307,6 +326,8 @@ export default function registerLolAdapters(register, client) {
       return { event_id, count: vods.length, vods: vods.slice(0, 8) };
     },
   });
+
+  if (!client) return;
 
   register('lol_event_details', {
     domain: 'lol',

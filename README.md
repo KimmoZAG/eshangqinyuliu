@@ -1,6 +1,51 @@
 # eshangqinyuliu
 
-QQ 群聊机器人「金桦」：接入 QQ 机器人开放平台 v2（WebSocket 事件 + OpenAPI 发送），带人设、按天滑动的群记忆、命令插件、6 小时定时话题与工具调用。
+QQ 群聊与私聊机器人「金桦」，通过 MaiBot v1.4.3 接入 QQ 开放平台。
+
+## MaiBot 运行方式
+
+安装 Node.js 22+、Git 和 uv，从仓库根目录运行。把 `.env.example` 复制为 `.env`，填入模型配置。安装器校验 MaiBot 源码提交、应用 QQ 送达补丁，并用 uv 创建 Python 3.12 隔离环境。默认实例位于 `data/maibot/instance`。
+
+```sh
+node --env-file=.env maibot.mjs install
+node --env-file=.env maibot.mjs doctor
+node --env-file=.env maibot.mjs run
+```
+
+在本地 `.env` 填模型的 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。修改后停宿主并运行 `node --env-file=.env maibot.mjs configure`。默认启动 QQ 适配器关闭，可以先用终端或 WebUI 本地聊天测试 Planner 与查询。WebUI 的地址和本地登录方式由 MaiBot 在启动终端显示。
+
+要接入测试 QQ，配置 `QQ_APP_ID`、`QQ_APP_SECRET`，以及以逗号分隔的 `JINHUA_QQ_GROUPS` 和 `JINHUA_QQ_USERS`，重新执行 `configure`，再启动：
+
+```sh
+node --env-file=.env maibot.mjs run --live-qq
+```
+
+同一 AppID 只运行一个 QQ 网关。验证时先试群 `@` 和私聊，再验证测试群可收全量消息并对普通消息做被动回复。通过后由群管理使用 `/说话` 开启自适应，`/闭嘴` 回到仅点名。`/金桦 状态` 查看开关，`/金桦 静默 2 8`、`/金桦 条数 2`、`/金桦 媒体 关` 和 `/金桦 工具 关` 按群配置。没有可信 QQ 角色时，可用 `JINHUA_ADMIN_OPENIDS` 授权。
+
+Node 查询服务由 MaiBot MCP 启动。LoL 赛程和录像、Steam 商店与 OP.GG 支持直连。HLTV 和已有的 LoL stdio 服务可在 `config/mcp.local.json` 配置，参考 `config/mcp.maibot.example.json` 填本机可执行文件及参数。联网搜索按 `SEARCH_ENABLED` 配置。
+
+管理员可在 WebUI 上切换金桦人设、上传并审核表情，以及查看或修正 A_Memorix 记忆。`/发图 名称` 和 `/表情 名称` 接受表情库中精确的描述名，或金桦插件数据目录 `images/` 中的同名 PNG／JPEG 文件。插件的绑定与群命令状态也在该插件数据目录。
+
+`node --env-file=.env maibot.mjs memory-review` 在实例的 `memory-review/` 生成逐会话审核材料。核对 `index.json` 后，在 A_Memorix 导入页面选择对应的聊天流，再导入相应文本。首次安装从旧数据导入口令和已验证成员，后续由 MaiBot 实例持有变更。
+
+### 验证和回滚
+
+```sh
+node --test
+node maibot.mjs test
+```
+
+离线用例检查查询证据、MCP 协议、记忆迁移和真实适配器的部分送达。正式切换前，在测试群和私聊逐项对照 QQ 可见内容、回执及历史，再用同一模型比较查询正确率、接话准确度、人设和延迟。停 MaiBot 后可用 `node --env-file=.env bot.mjs` 运行旧版。
+
+```sh
+node --env-file=.env maibot.mjs replay
+```
+
+回放使用固定的模拟数据和配置的模型 API，QQ 发送由本地驱动接收。旧版、原版 MaiBot 与新版分别回放 40 条查询、60 条群聊和 20 条语气样本。运行目录有逐条结果、首条模拟送达耗时、模型调用数及 `blind.md` 盲评稿。盲评完成后用同目录的 `blind-key.json` 统计胜率。可用 `--kind query`、`--kind group` 或 `--kind voice` 单独复测。
+
+## 旧版回滚实现
+
+旧版直接接入 QQ 机器人开放平台 v2，带按天滑动的群记忆、命令插件、定时话题与工具调用。
 
 ## 特性
 
@@ -40,7 +85,7 @@ probe.mjs / listen.mjs / send.mjs / smoke-opgg.mjs   调试与冒烟脚本
 
 ```bash
 cp .env.example .env     # 填 AppID / AppSecret / LLM 配置
-sh run.sh                # 守护启动，崩溃 3 秒自动拉起
+node --env-file=.env bot.mjs
 ```
 
 环境变量：

@@ -8,7 +8,7 @@ import { deliver } from './delivery.mjs';
 import { startJobs, noteGroup, runTopic, ensure } from './jobs.mjs';
 import { startMcpServers, listTools } from './tools.mjs';
 import { ALIASES } from '../persona.mjs';
-import { nameOf, setNickname } from './members.mjs';
+import { nameOf, readMembers, setNickname } from './members.mjs';
 
 const BOT_NAME = process.env.BOT_NAME || '金桦';
 const REPLY_WINDOW = num('REPLY_WINDOW_MS', 4.5 * 60 * 1000);
@@ -93,15 +93,16 @@ async function onGroupMessage(evt, receivedAt) {
   const ctx = { group, uid, sessionKey: group + ':' + uid, role: author.member_role || 'member', cfg, speaker };
 
   // 张睿诚说闭嘴/说话，直接执行（服从的具体落点）
-  if (speaker === '张睿诚') {
+  const member = speaker === ALIASES.zrc && readMembers([uid]).get(uid);
+  if (member?.verified && member.name === ALIASES.zrc) {
     if (/^(闭嘴|安静|别说了|别说话)/.test(text)) {
       patchGroupConfig(group, { features: { interject: false } });
-      await sendLines({ scope: 'group', group, lines: ['行 我闭嘴'], msgId: isAt ? d.id : undefined, kind: isAt ? 'reply' : 'proactive', turnId: `${group}:${d.id}` });
+      await deliver({ ...turn, group, lines: ['行 我闭嘴'], msgId: d.id });
       return;
     }
     if (/^(说话|别憋着|继续)/.test(text)) {
       patchGroupConfig(group, { features: { interject: true } });
-      await sendLines({ scope: 'group', group, lines: ['那我可就不客气了'], msgId: isAt ? d.id : undefined, kind: isAt ? 'reply' : 'proactive', turnId: `${group}:${d.id}` });
+      await deliver({ ...turn, group, lines: ['那我可就不客气了'], msgId: d.id });
       return;
     }
   }

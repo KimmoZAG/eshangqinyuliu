@@ -24,7 +24,7 @@ PATTERN = (
     r"^/(?:帮助|help|菜单|绑定|bind|认证|战绩|stats|战况|开黑报名|报名|开黑|闭嘴|安静|"
     r"说话|暧昧|撩|话题|发图|表情|金桦)(?:\s|$)|^(?:闭嘴|说话)$"
 )
-LEADING_CALLOUT = re.compile(r"^@(?:金桦（黄石版）|金桦)(?=$|[\s，,：:])[\s，,：:]*")
+LEADING_CALLOUT = re.compile(r"^@?(?:金桦（黄石版）|金桦)[\s，,：:]*")
 RELATIONSHIP_CLAIM = re.compile(r"我(?:就是|是)\s*(?:诚哥|张睿诚|zrc|浩文|刘浩文|lhw)", re.I)
 TOPIC_INTERVAL = 6 * 3600
 
@@ -169,8 +169,8 @@ class JinhuaPlugin(MaiBotPlugin):
         if group and text == "/话题" and self.admin(user, role):
             message["is_at"] = True
         session = message["session_id"]
-        turn = Turn(message["message_id"], user, group, text,
-                    bool(not group or message.get("is_at") or callout), mode, int(time.time() * 1000))
+        addressed = bool(not group or message.get("is_at") or callout or message.get("is_mentioned"))
+        turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
         self.remember(session, turn)
         if text in {"闭嘴", "说话"} and not (self.admin(user, role) or alias == "张睿诚"):
             # Keep an ordinary sentence from being treated as a command.
@@ -306,6 +306,9 @@ class JinhuaPlugin(MaiBotPlugin):
         ordinary = turn.group and not turn.explicit
         quiet = ordinary and (not policy.get("interject") or self.quiet(turn.group))
         allowed = {"no_action", "stop", "wait"}
+        if turn.explicit:
+            # 被 @ 或叫到名字时必须回一句，不许选沉默
+            allowed.discard("no_action")
         lookup_items = turn.lookup_items
         if not quiet:
             allowed.update({"reply", "read_tool_result", "query_memory", "query_person_profile"})
@@ -405,6 +408,7 @@ class JinhuaPlugin(MaiBotPlugin):
             return {"action": "continue"}
         aliases = self.state.aliases()
         name = aliases.get(turn.user, {}).get("name") or ""
+        roster = sorted({record.get("name") for record in aliases.values() if record.get("name")})
         prompt = (
             "直接接对方这一句，找一个具体细节。普通接话一句就够，别把群友原句复述一遍。"
             "求助先接感受，再给一个办法；玩笑就顺着当下的梗接。"
@@ -423,6 +427,13 @@ class JinhuaPlugin(MaiBotPlugin):
             prompt += (
                 " 对刘浩文嘴上可以轻轻顶一句，话里偏心他。用反问或半句话留个来回，他说想歇就顺着。"
                 "别人拿他开涮时可以替他挡一句，轻损之后给他留台阶。"
+            )
+        if roster:
+            prompt += (
+                " 群里已经认出来的真人："
+                + "、".join(roster)
+                + "。被问到其中某个人时算认识，可以说对他的印象和你俩的关系；"
+                "问到不在名单里的人，就直说不认识别编。"
             )
         if not name:
             prompt += " 对方的群名片可作称呼。自报认识的人时，熟人关系以绑定为准。"

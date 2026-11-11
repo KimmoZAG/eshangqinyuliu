@@ -31,7 +31,7 @@ def preview(data: Path, output: Path) -> dict:
         features = legacy.get("features", {})
         # Every imported group needs a fresh full-message and passive-reply smoke.
         groups[file.stem] = {
-            "interject": False, "flirt": features.get("flirt", True),
+            "interject": True, "flirt": features.get("flirt", True),
             "tools": features.get("tools", features.get("search", True)),
             "search": features.get("search", False), "topic": features.get("topic", True),
             "replyMode": legacy.get("replyMode", "auto"), "replyLimit": legacy.get("replyLimit", 5),

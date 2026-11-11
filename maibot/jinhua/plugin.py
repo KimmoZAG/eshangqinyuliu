@@ -337,8 +337,16 @@ class JinhuaPlugin(MaiBotPlugin):
             elif name == "reply":
                 properties = function.get("parameters", {}).get("properties", {})
                 properties.pop("attach_pic", None)
-                # 没有审核过的表情库：上游解析 attach_emoji 会抛 ValueError，整条回复被丢弃
-                properties.pop("attach_emoji", None)
+                try:
+                    has_emoji = await self.emoji_ready()
+                except Exception:
+                    has_emoji = False
+                if not has_emoji or not policy.get("media", True):
+                    # 表情库空时上游解析会失败（只打 warning），没必要让模型去填
+                    properties.pop("attach_emoji", None)
+                elif "attach_emoji" in properties:
+                    emoji = properties["attach_emoji"]
+                    emoji["description"] = "按情绪或画面从已审核表情库选一张。只有表情能补充这句回复时才填写。" 
             tools.append(tool)
         kwargs["tool_definitions"] = tools
         self.active_tools[session] = (turn.anchor, {tool["function"]["name"] for tool in tools})
@@ -473,6 +481,33 @@ class JinhuaPlugin(MaiBotPlugin):
         kwargs["response"] = answer
         return {"action": "continue", "modified_kwargs": kwargs}
 
+    async def emoji_ready(self) -> bool:
+        """表情库是否有可用素材；结果缓存 5 分钟，避免每条消息都探测。"""
+        now = time.time()
+        cached = getattr(self, "_emoji_ready", None)
+        if cached and now - cached[0] < 300:
+            return cached[1]
+        ready = False
+        try:
+            result = await self.ctx.call_capability("emoji.get_by_description", description="笑", limit=1)
+            ready = bool(result.get("emoji")) if isinstance(result, dict) else False
+        except Exception:
+            ready = False
+        self._emoji_ready = (now, ready)
+        return ready
+
+    @HookHandler("send_service.after_send", mode=HookMode.BLOCKING)
+    async def after_send(self, **kwargs):
+        message = kwargs.get("message") or {}
+        if message.get("platform") != "qq":
+            return {"action": "continue"}
+        text = message.get("processed_plain_text") or ""
+        self.ctx.logger.info(
+            "金桦出站完成 session=%s target=%s len=%s ok=%s",
+            str(message.get("session_id"))[:12], str(kwargs.get("target_id") or "")[:12], len(text), kwargs.get("success", "?"),
+        )
+        return {"action": "continue"}
+
     @HookHandler("send_service.before_send", mode=HookMode.BLOCKING)
     async def before_send(self, **kwargs):
         message = kwargs["message"]
@@ -522,6 +557,13 @@ class JinhuaPlugin(MaiBotPlugin):
             limit = min(limit, 2)
         if not parts or turn.lines + parts > limit:
             return abort("当前回合回复条数达到上限")
+        try:
+            self.ctx.logger.info(
+                "金桦出站放行 anchor=%s parts=%s limit=%s elapsed_ms=%s",
+                turn.anchor[:14], parts, limit, now - turn.received_ms,
+            )
+        except Exception:
+            pass
         kwargs["typing"] = False
         return {"action": "continue", "modified_kwargs": kwargs}
 

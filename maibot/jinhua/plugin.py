@@ -489,8 +489,21 @@ class JinhuaPlugin(MaiBotPlugin):
         if not turn:
             return abort("金桦出站需要当前会话的入站锚点")
         now = int(time.time() * 1000)
+
+        # 锚点可能指向一条更早的消息：若它已超时、而同一会话有更新的回合，改用最新回合
+        newest = self.get_turn(message["session_id"], None)
+        if newest and newest.anchor != turn.anchor and now >= turn.expires_ms and newest.expires_ms > now:
+            self.ctx.logger.warning(
+                "发送锚点过期，改用最新回合 anchor=%s -> %s（相差 %.1fs）",
+                turn.anchor[:14], newest.anchor[:14], (newest.received_ms - turn.received_ms) / 1000,
+            )
+            turn = newest
+
         if now >= turn.expires_ms:
-            self.ctx.logger.info("金桦出站已超时 msg_id=%s elapsed_ms=%s", anchor, now - turn.received_ms)
+            self.ctx.logger.warning(
+                "金桦出站已超时 msg_id=%s elapsed_ms=%s budget_ms=%s over_ms=%s",
+                anchor, now - turn.received_ms, BUDGET_MS[turn.mode], now - turn.expires_ms,
+            )
             return abort("当前回合已经超时")
         policy = self.state.policy(turn.group)
         if turn.group and not turn.explicit and not self.adaptive(turn.group):

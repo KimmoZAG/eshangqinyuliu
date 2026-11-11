@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import re
@@ -25,6 +26,8 @@ COMMANDS = {
 ADDRESSED_HINT = re.compile(
     r"(?:你|妳)[^。！？!?]{0,20}(?:不回|没回|不说话|说话|在吗|在不在|闭嘴|装死|哑了|死了|欠|机器人|\bAI\b)"
 )
+
+EMOJI_TOKEN = re.compile(r"\[\[([^\[\]]{1,12})\]\]")
 
 PATTERN = (
     r"^/(?:帮助|help|菜单|绑定|bind|认证|战绩|stats|战况|开黑报名|报名|开黑|闭嘴|安静|"
@@ -143,6 +146,29 @@ class JinhuaPlugin(MaiBotPlugin):
         result = await self.ctx.call_capability("emoji.get_by_description", description=name, limit=1, exact=True)
         item = result.get("emoji") if isinstance(result, dict) else None
         return item.get("base64", "") if isinstance(item, dict) else ""
+
+
+    def emoji_file(self, tag: str) -> str:
+        """从 data/images 里取表情，返回 base64；找不到返回空字符串。"""
+        name = str(tag or "").strip()
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            return ""
+        root = (self.ctx.paths.data_dir / "images").resolve()
+        for suffix in (".png", ".jpg", ".jpeg"):
+            path = (root / (name + suffix)).resolve()
+            if path.parent == root and path.is_file() and path.stat().st_size <= 5 * 1024 * 1024:
+                return base64.b64encode(path.read_bytes()).decode("ascii")
+        return ""
+
+    async def push_emoji(self, session: str, tags, message) -> None:
+        for tag in list(tags)[:2]:
+            raw = self.emoji_file(tag)
+            if not raw:
+                continue
+            try:
+                await self.ctx.send.emoji(raw, session, reply_message=message, sync_to_maisaka_history=False)
+            except Exception as exc:
+                self.ctx.logger.warning("金桦发表情失败 tag=%s err=%s", tag, exc)
 
     @HookHandler("chat.receive.after_process", mode=HookMode.BLOCKING)
     async def receive(self, **kwargs):
@@ -449,6 +475,15 @@ class JinhuaPlugin(MaiBotPlugin):
                 " 对刘浩文嘴上可以轻轻顶一句，话里偏心他。用反问或半句话留个来回，他说想歇就顺着。"
                 "别人拿他开涮时可以替他挡一句，轻损之后给他留台阶。"
             )
+        try:
+            names = sorted(p.stem for p in (self.ctx.paths.data_dir / "images").glob("*.png"))[:30]
+        except Exception:
+            names = []
+        if names:
+            prompt += (
+                " 想配一张表情时，在回复里单独写一个 [[标签]]（系统会换成图片，标签本身不会显示）。"
+                "可用标签：" + "、".join(names) + "。一条最多一个，别每条都配。"
+            )
         if roster:
             prompt += (
                 " 群里已经认出来的真人："
@@ -511,6 +546,10 @@ class JinhuaPlugin(MaiBotPlugin):
         message = kwargs.get("message") or {}
         if message.get("platform") != "qq":
             return {"action": "continue"}
+        queue = getattr(self, "_emoji_queue", {})
+        tags = queue.pop(message.get("session_id"), None)
+        if tags and kwargs.get("sent", True):
+            asyncio.create_task(self.push_emoji(message.get("session_id"), tags, message))
         text = message.get("processed_plain_text") or ""
         self.ctx.logger.info(
             "金桦出站完成 session=%s target=%s len=%s ok=%s",
@@ -592,6 +631,21 @@ class JinhuaPlugin(MaiBotPlugin):
             dropped = self.sanitize_emoji(segments)
         except Exception:
             dropped = 0
+
+        tags = []
+        for seg in segments:
+            if seg.get("type") == "text" and isinstance(seg.get("data"), str):
+                found = EMOJI_TOKEN.findall(seg["data"])
+                if found:
+                    tags.extend(found)
+                    seg["data"] = EMOJI_TOKEN.sub("", seg["data"]).strip()
+        if tags:
+            self._emoji_queue = getattr(self, "_emoji_queue", {})
+            self._emoji_queue[message["session_id"]] = tags
+            if not any(isinstance(seg.get("data"), str) and seg["data"].strip()
+                       for seg in segments if seg.get("type") == "text"):
+                asyncio.create_task(self.push_emoji(message["session_id"], tags, message))
+                return abort("只有表情，改为直接发图")
         if dropped:
             try:
                 self.ctx.logger.info("金桦出站清理不兼容表情 %d 个 mode=%s", dropped, os.environ.get("EMOJI_MODE") or "safe")

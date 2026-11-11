@@ -43,6 +43,43 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(State(directory, directory / "missing.json").name("openid"), "张睿诚")
             self.assertIn("用过", state.redeem("code", "other"))
 
+    def test_existing_instance_reads_legacy_alias_edits_by_openid(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            data = base / "data"
+            data.mkdir()
+            seed = base / "legacy.json"
+            seed.write_text(json.dumps({"aliases": {"old": {"name": "安装时的别名"}}}), encoding="utf-8")
+            directory = base / "plugin"
+            previous = State(directory, seed)
+            previous.value["aliases"]["native"] = {"name": "新版绑定"}
+            previous.value["codes"]["CODE"] = {"name": "口令绑定", "expireAt": "2099-11-01T12:00:00Z"}
+            previous.save()
+
+            state = State(directory, seed, data)
+            self.assertEqual(state.name("old"), "安装时的别名")
+            aliases = data / "aliases.json"
+            aliases.write_text(json.dumps({"old": {"name": "新别名"}, "native": {"name": "管理员称呼"}}),
+                               encoding="utf-8-sig")
+            (data / "profiles.json").write_text(json.dumps({
+                "native": {"name": "旧画像", "verified": True},
+                "verified": {"name": "已验证旧画像", "verified": True},
+                "self-reported": {"name": "自报名片", "verified": False},
+            }), encoding="utf-8")
+            self.assertEqual(state.name("old"), "新别名")
+            self.assertEqual(state.name("native"), "管理员称呼")
+            self.assertEqual(state.name("verified"), "已验证旧画像")
+            self.assertEqual(state.name("self-reported"), "")
+            self.assertIn("管理员称呼", state.redeem("CODE", "native"))
+            self.assertNotIn("usedAt", state.value["codes"]["CODE"])
+
+            aliases.write_text("{}", encoding="utf-8")
+            self.assertEqual(state.name("old"), "")
+            self.assertEqual(state.name("native"), "新版绑定")
+            self.assertIn("口令绑定", state.redeem("CODE", "native"))
+            self.assertEqual(State(directory, seed, data).name("native"), "口令绑定")
+            self.assertEqual(aliases.read_text(encoding="utf-8"), "{}")
+
 
 class EvidenceTests(unittest.TestCase):
     def test_tool_outputs_have_scope_and_missing_question_keeps_a_status(self):
@@ -104,7 +141,7 @@ class InstalledUpstreamTests(unittest.IsolatedAsyncioTestCase):
         from jinhua.plugin import JinhuaPlugin
 
         plugin = SimpleNamespace(
-            state=SimpleNamespace(policy=lambda _: {}), turns={}, active_tools={}, started=time.time(),
+            state=SimpleNamespace(policy=lambda _: {}, name=lambda _: ""), turns={}, active_tools={}, started=time.time(),
         )
         plugin.remember = lambda session, turn: plugin.turns.update({session: turn})
         plugin.get_turn = lambda session: plugin.turns.get(session)
@@ -135,6 +172,29 @@ class InstalledUpstreamTests(unittest.IsolatedAsyncioTestCase):
         message["processed_plain_text"] = message["raw_message"][0]["data"] = "@金桦 /发图 联调图"
         await JinhuaPlugin.receive(plugin, message=message)
         self.assertEqual(message["processed_plain_text"], "/发图 联调图")
+
+    async def test_qq_context_uses_legacy_alias_without_replacing_user_id(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            openid = "A" * 32
+            (base / "aliases.json").write_text(json.dumps({openid: {"name": "绑定称呼"}}), encoding="utf-8")
+            plugin = SimpleNamespace(
+                state=State(base / "plugin", base / "missing.json", base),
+                remember=lambda *_: None, registrations={},
+            )
+            message = {
+                "message_id": "in", "session_id": "pilot", "platform": "qq", "is_at": True,
+                "message_info": {
+                    "additional_config": {"qq_official_user_openid": openid, "qq_official_group_openid": "pilot"},
+                    "user_info": {"user_id": "unified-id", "user_nickname": "QQ昵称", "user_cardname": "群名片"},
+                },
+                "processed_plain_text": "晚上好", "raw_message": [{"type": "text", "data": "晚上好"}],
+            }
+            result = await JinhuaPlugin.receive(plugin, message=message)
+            user = result["modified_kwargs"]["message"]["message_info"]["user_info"]
+            self.assertEqual(user, {"user_id": "unified-id", "user_nickname": "绑定称呼", "user_cardname": "绑定称呼"})
 
     async def test_qq_partial_delivery_keeps_actual_fragment(self):
         from src.plugins.built_in.qq_official_adapter.plugin import QQOfficialAdapterPlugin

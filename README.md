@@ -26,7 +26,9 @@ Node 查询服务由 MaiBot MCP 启动。LoL 赛程和录像、Steam 商店与 O
 
 管理员可在 WebUI 上切换金桦人设、上传并审核表情，以及查看或修正 A_Memorix 记忆。`/发图 名称` 和 `/表情 名称` 接受表情库中精确的描述名，或金桦插件数据目录 `images/` 中的同名 PNG／JPEG 文件。插件的绑定与群命令状态也在该插件数据目录。
 
-`node --env-file=.env maibot.mjs memory-review` 在实例的 `memory-review/` 生成逐会话审核材料。核对 `index.json` 后，在 A_Memorix 导入页面选择对应的聊天流，再导入相应文本。首次安装从旧数据导入口令和已验证成员，后续由 MaiBot 实例持有变更。
+旧版的 `data/aliases.json` 放在仓库根目录的 `data/` 下，可继续用 `node bind.mjs map <完整OpenID> <名字>` 管理。MaiBot 按 QQ 入站 OpenID 读取绑定，别名表里的记录优先生效，更新后下一条消息即可使用新称呼。已有 MaiBot 实例升级后，先运行 `node --env-file=.env maibot.mjs configure`。
+
+`node --env-file=.env maibot.mjs memory-review` 在实例的 `memory-review/` 生成逐会话审核材料。核对 `index.json` 后，在 A_Memorix 导入页面选择对应的聊天流，再导入相应文本。首次安装导入旧口令，MaiBot 的 `/绑定` 记录保存在实例里。
 
 ### 验证和回滚
 

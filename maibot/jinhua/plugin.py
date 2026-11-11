@@ -36,6 +36,7 @@ class PluginSettings(PluginConfigBase):
 
 class Settings(PluginConfigBase):
     plugin: PluginSettings = Field(default_factory=PluginSettings)
+    legacy_data_dir: str = Field(default="")
     admin_openids: list[str] = Field(default_factory=list)
     deep_model_name: str = Field(default="")
     fast_model_name: str = Field(default="")
@@ -66,7 +67,8 @@ class JinhuaPlugin(MaiBotPlugin):
     config_model: ClassVar[type[Settings]] = Settings
 
     async def on_load(self) -> None:
-        self.state = State(self.ctx.paths.data_dir, Path(__file__).with_name("legacy.json"))
+        legacy_data = Path(self.config.legacy_data_dir) if self.config.legacy_data_dir else None
+        self.state = State(self.ctx.paths.data_dir, Path(__file__).with_name("legacy.json"), legacy_data)
         self.turns: OrderedDict[tuple[str, str], Turn] = OrderedDict()
         self.latest: dict[str, str] = {}
         self.active_tools: dict[str, tuple[str, set[str]]] = {}
@@ -139,6 +141,12 @@ class JinhuaPlugin(MaiBotPlugin):
         user, group, role = qq_identity(message)
         if not user:
             return {"action": "continue"}
+        alias = self.state.name(user)
+        if alias:
+            user_info = message["message_info"]["user_info"]
+            user_info["user_nickname"] = alias
+            if group:
+                user_info["user_cardname"] = alias
         text = command_text(message)
         callout = bool(group and LEADING_CALLOUT.match((message.get("processed_plain_text") or "").strip()))
         if callout:
@@ -164,7 +172,7 @@ class JinhuaPlugin(MaiBotPlugin):
         turn = Turn(message["message_id"], user, group, text,
                     bool(not group or message.get("is_at") or callout), mode, int(time.time() * 1000))
         self.remember(session, turn)
-        if text in {"闭嘴", "说话"} and not (self.admin(user, role) or self.state.name(user) == "张睿诚"):
+        if text in {"闭嘴", "说话"} and not (self.admin(user, role) or alias == "张睿诚"):
             # Keep an ordinary sentence from being treated as a command.
             message["processed_plain_text"] = text + "。"
             for segment in message.get("raw_message", []):
@@ -395,7 +403,8 @@ class JinhuaPlugin(MaiBotPlugin):
         turn = self.get_turn(kwargs["session_id"], kwargs.get("reply_message_id"))
         if not turn:
             return {"action": "continue"}
-        name = self.state.name(turn.user)
+        aliases = self.state.aliases()
+        name = aliases.get(turn.user, {}).get("name") or ""
         prompt = (
             "直接接对方这一句，找一个具体细节。普通接话一句就够，别把群友原句复述一遍。"
             "求助先接感受，再给一个办法；玩笑就顺着当下的梗接。"
@@ -408,7 +417,7 @@ class JinhuaPlugin(MaiBotPlugin):
                 "平时一句『行行行 听你的』的松弛劲就够，叫法看当前聊天，他要夸就认真夸。"
             )
         if self.state.policy(turn.group).get("flirt", True) and (
-            name == "刘浩文" or any(self.state.name(openid) == "刘浩文" for openid in self.state.value["aliases"])
+            name == "刘浩文" or any(record.get("name") == "刘浩文" for record in aliases.values())
             and re.search(r"刘浩文|lhw|浩文", turn.text, re.I)
         ):
             prompt += (

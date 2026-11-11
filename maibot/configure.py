@@ -41,6 +41,7 @@ def ids(env: str) -> list[str]:
 
 
 def configure(root: Path, instance: Path, node: Path, node_proxy: bool, *, legacy_data: Path | None = None) -> None:
+    legacy_data = legacy_data if legacy_data is not None else root / "data"
     plugin_source = root / "maibot" / "jinhua"
     plugin = instance / "plugins" / "jinhua"
     plugin.mkdir(parents=True, exist_ok=True)
@@ -49,12 +50,13 @@ def configure(root: Path, instance: Path, node: Path, node_proxy: bool, *, legac
             shutil.copyfile(path, plugin / path.name)
     first_run = not (plugin / "legacy.json").exists()
     if first_run:
-        migration = preview(legacy_data if legacy_data is not None else root / "data", instance)
+        migration = preview(legacy_data, instance)
         write_json(plugin / "legacy.json", migration["seed"])
         print("旧数据预演", migration["summary"])
 
     plugin_config = load(plugin / "config.toml")
     set_values(plugin_config, ("plugin",), {"enabled": True, "config_version": "1.0.0"})
+    plugin_config["legacy_data_dir"] = str(legacy_data.resolve())
     for setting, env in [
         ("admin_openids", "JINHUA_ADMIN_OPENIDS"), ("fast_model_name", "JINHUA_FAST_MODEL"),
         ("deep_model_name", "JINHUA_DEEP_MODEL"),

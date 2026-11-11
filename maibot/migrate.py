@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
-from jinhua.state import read_json, write_json
-
-OPENID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+from jinhua.state import OPENID, read_json, read_member_records, write_json
 
 
 def rows(path: Path):
@@ -41,12 +38,9 @@ def preview(data: Path, output: Path) -> dict:
             "quiet": legacy.get("quiet", [2, 8]), "media": True,
         }
     aliases = {
-        key: item for key, item in read_json(data / "aliases.json", {}).items()
-        if OPENID.fullmatch(key) and isinstance(item, dict) and item.get("name")
+        **(read_member_records(data / "profiles.json", verified_only=True) or {}),
+        **(read_member_records(data / "aliases.json") or {}),
     }
-    for key, item in read_json(data / "profiles.json", {}).items():
-        if OPENID.fullmatch(key) and isinstance(item, dict) and item.get("verified") and item.get("name"):
-            aliases.setdefault(key, {"name": item["name"]})
 
     grouped = {}
     orphaned = []

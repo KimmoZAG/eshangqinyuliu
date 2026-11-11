@@ -224,9 +224,12 @@ export async function composeReply({
   ]);
   const member = members.get(uid);
   const relationship = member?.verified && member.name === ALIASES.zrc;
-  const crush = member?.verified && member.name === ALIASES.lhw && cfg.features?.flirt !== false;
+  const flirtOn = cfg.features?.flirt !== false;
+  const crushSpeaking = !!(member?.verified && member.name === ALIASES.lhw && flirtOn);
+  // 全局暧昧：他本人说话，或别人提到他，都带这层关系
+  const crush = flirtOn && (crushSpeaking || /刘浩文|lhw|浩文/i.test(message));
   const scene = SUPPORT.test(message) ? 'support' : structured && hasLookup ? 'facts'
-    : interject ? 'interject' : relationship ? 'close' : crush ? 'flirt' : 'chat';
+    : interject ? 'interject' : relationship ? 'close' : crushSpeaking ? 'flirt' : 'chat';
   const available = !structured || items.some((item) => item.status === 'chat' || item.status === 'evidence');
   let output = '';
   let error;
@@ -238,7 +241,7 @@ export async function composeReply({
       questions: structured ? items.map(({ id, text, status, evidence }) => ({ id, text, status, evidence })) : undefined,
     };
     const stage = structured ? '[answer-by-id] ' : '[chat-reply] ';
-    const messages = [{ role: 'system', content: stage + systemPrompt(members, { scene, structured, relationship }) }];
+    const messages = [{ role: 'system', content: stage + systemPrompt(members, { scene, structured, relationship, crush }) }];
     const payload = JSON.stringify(prompt);
     messages.push({
       role: 'user', content: image

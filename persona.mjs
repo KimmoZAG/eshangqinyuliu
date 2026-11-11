@@ -53,7 +53,14 @@ const SCENES = {
   ],
 };
 
-export function buildSystemPrompt({ botName, members, now, scene = 'chat', structured = false, relationship = false }) {
+const CRUSH = [
+  '刘浩文是你的暧昧对象。这层关系群里都知道个大概，你不用藏，但也别当众说破。',
+  '别人提到他，你会偏心：嘴上损两句，转头替他找补，或者干脆岔开不让人继续说他。',
+  '被要求评价他，先挑一个具体的小毛病，再给一句台阶（“但他残局还行”），不许把人说死。',
+  '暧昧靠语气，不靠艾特：不要为了证明关系去主动 @ 他。',
+];
+
+export function buildSystemPrompt({ botName, members, now, scene = 'chat', structured = false, relationship = false, crush = false }) {
   const tone = Number(process.env.PERSONA_TONE ?? 1);
   const toneNote = tone === 0 ? '语气平一点。' : tone === 2 ? '互损时可以先捧一句再轻轻补刀。' : '';
   const format = structured
@@ -70,5 +77,6 @@ export function buildSystemPrompt({ botName, members, now, scene = 'chat', struc
     '当前北京时间 ' + now,
     members.length ? '当前对话里出现的人 ' + [...new Set(members)].join('、') : '',
     format,
+    ...(crush ? CRUSH : []),
   ].filter(Boolean).join('\n');
 }

@@ -30,6 +30,12 @@ ADDRESSED_HINT = re.compile(
 
 SELF_TAG = re.compile(r"<@!?([^>\s]{6,})>")
 
+EMOJI_SEMANTICS = {
+    "眯眼笑": "嘲讽群友时用，尤其是某人吹牛、找借口、被拆穿的时候",
+    "有意思": "有人发了有意思、好笑、离谱的内容时用，表示你看到了",
+    "合适": "有人夸金桦、说金桦好话的时候用，表示受用但不谦虚",
+}
+
 EMOJI_TOKEN = re.compile(r"\[\[([^\[\]]{1,12})\]\]")
 
 PATTERN = (
@@ -144,6 +150,40 @@ class JinhuaPlugin(MaiBotPlugin):
                                           storage_message=history, sync_to_maisaka_history=history)
         return bool(result)
 
+
+
+    def parse_plan(self, text: str):
+        """解析 replyer 输出的 {"emoji":…, "lines":[…]}；不是这个格式就返回 None。"""
+        raw = (text or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw).strip()
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(raw[start:end + 1])
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        lines = [re.sub(r"\s+", " ", str(x)).strip() for x in (data.get("lines") or []) if str(x).strip()]
+        if not lines:
+            return None
+        return {"emoji": str(data.get("emoji") or "").strip(), "lines": lines[:3]}
+
+    async def deliver_plan(self, session: str, plan: dict, message: dict) -> None:
+        """按计划发送：先图，再逐条文字。"""
+        try:
+            if plan.get("emoji"):
+                await self.push_emoji(session, [plan["emoji"]], message)
+            for line in plan["lines"]:
+                await self.ctx.send.text(line, session, reply_message=message)
+                await asyncio.sleep(1.2)
+        except Exception as exc:
+            try:
+                self.ctx.logger.warning("金桦结构化发送失败 %s", exc)
+            except Exception:
+                pass
 
     def bump(self, key: str) -> None:
         try:
@@ -636,10 +676,15 @@ class JinhuaPlugin(MaiBotPlugin):
         except Exception:
             names = []
         if names:
+            special = "；".join(f"{tag}={desc}" for tag, desc in self.EMOJI_SEMANTICS.items() if tag in names)
             prompt += (
-                " 想配表情就在回复里写一个 [[标签]]（系统会换成一张图，标签本身不会显示，前后别加换行）。"
-                "情绪明显、想怼人、想卖乖的时候都可以用，平均每两三条回复来一个没问题。"
-                "同一个标签别连着用，可用标签：" + "、".join(names) + "。"
+                "\n\n【输出格式】只输出一个 JSON 对象，不要代码块、不要解释："
+                '{"emoji":"标签或空","lines":["第一段","第二段"]}'
+                "。lines 1 到 3 条，每条一句话、不超过 40 字，按发送顺序排。"
+                "emoji 从下面的标签里选一个，大多数回复都该配；不想配就填空字符串。"
+                "\n【表情用法】" + (special + "；" if special else "")
+                + "其余标签按情绪选：反常理就配，别连着两条用同一个。"
+                "\n可用标签：" + "、".join(names)
             )
         if roster:
             prompt += (
@@ -806,6 +851,23 @@ class JinhuaPlugin(MaiBotPlugin):
             dropped = self.sanitize_emoji(segments)
         except Exception:
             dropped = 0
+
+        plan_text = "".join(seg.get("data", "") for seg in segments if seg.get("type") == "text")
+        plan = None
+        try:
+            plan = self.parse_plan(plan_text)
+        except Exception:
+            plan = None
+        if not plan and plan_text.strip().startswith("{") and '"lines"' in plan_text:
+            turn.handled = True
+            salvage = [x for x in re.findall(r'"([^"\\]{2,60})"', plan_text) if x not in {"emoji", "lines"}]
+            if salvage:
+                asyncio.create_task(self.deliver_plan(message["session_id"], {"emoji": "", "lines": salvage[:2]}, message))
+            return abort("结构化回复解析失败，已按纯文本投递")
+        if plan:
+            turn.handled = True
+            asyncio.create_task(self.deliver_plan(message["session_id"], plan, message))
+            return abort("结构化回复改由插件按段发送")
 
         tags = []
         for seg in segments:

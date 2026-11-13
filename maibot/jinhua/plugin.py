@@ -676,7 +676,7 @@ class JinhuaPlugin(MaiBotPlugin):
         except Exception:
             names = []
         if names:
-            special = "；".join(f"{tag}={desc}" for tag, desc in self.EMOJI_SEMANTICS.items() if tag in names)
+            special = "；".join(f"{tag}={desc}" for tag, desc in EMOJI_SEMANTICS.items() if tag in names)
             prompt += (
                 "\n\n【输出格式】只输出一个 JSON 对象，不要代码块、不要解释："
                 '{"emoji":"标签或空","lines":["第一段","第二段"]}'

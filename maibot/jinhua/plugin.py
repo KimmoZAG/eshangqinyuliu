@@ -144,6 +144,42 @@ class JinhuaPlugin(MaiBotPlugin):
                                           storage_message=history, sync_to_maisaka_history=history)
         return bool(result)
 
+
+    def bump(self, key: str) -> None:
+        try:
+            path = self.ctx.paths.data_dir / "health.json"
+            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            data[key] = int(data.get(key, 0)) + 1
+            data["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def arm_watchdog(self, session: str, turn: Turn, message: dict, delay: float = 20.0) -> None:
+        """回合兜底：到点还没发出任何消息，就补一句，绝不让对方干等。"""
+
+        async def wait() -> None:
+            await asyncio.sleep(delay)
+            if getattr(turn, "handled", False) or getattr(turn, "fallback_sent", False):
+                return
+            turn.fallback_sent = True
+            self.bump("fallback_sent")
+            try:
+                self.ctx.logger.warning("金桦兜底发言 session=%s anchor=%s", session[:12], turn.anchor[:14])
+            except Exception:
+                pass
+            for text in ("我这卡了一下 你再说一遍？",):
+                try:
+                    await self.ctx.send.text(text, session, reply_message=message)
+                    return
+                except Exception as exc:
+                    try:
+                        self.ctx.logger.warning("金桦兜底发送失败 %s", exc)
+                    except Exception:
+                        pass
+
+        asyncio.create_task(wait())
+
     async def asset(self, name: str) -> str:
         if not name or len(name) > 80 or "/" in name or "\\" in name or name.startswith("."):
             return ""
@@ -254,6 +290,11 @@ class JinhuaPlugin(MaiBotPlugin):
                 pass
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
         self.remember(session, turn)
+        if addressed:
+            try:
+                self.arm_watchdog(session, turn, message)
+            except Exception:
+                pass
         if text in {"闭嘴", "说话"} and not (self.admin(user, role) or alias == "张睿诚"):
             # Keep an ordinary sentence from being treated as a command.
             message["processed_plain_text"] = text + "。"
@@ -449,6 +490,11 @@ class JinhuaPlugin(MaiBotPlugin):
                     "\n对方明确在叫你（@ 或直接叫了名字）。这一轮必须调用 reply 工具回一句，"
                     "不要只输出文本，也不要选 stop 或 wait；不知道说什么就顺着上一句接一句短的。"
                 )
+            if lookup_items:
+                hint += (
+                    "\n工具失败、超时或返回 ok=false 时，最多再试一次，然后直接用一句话说明没查到，"
+                    "必须给出可见回复，不许沉默。"
+                )
             if lookup_items and "jinhua_lookup" in allowed:
                 hint += "\n下列查询项的 text 保留原句，别改写。" + " / ".join(lookup_items)
             if turn.topic:
@@ -596,6 +642,13 @@ class JinhuaPlugin(MaiBotPlugin):
 
     @HookHandler("send_service.after_send", mode=HookMode.BLOCKING)
     async def after_send(self, **kwargs):
+        try:
+            anchor = (kwargs.get("message") or {}).get("reply_to") or kwargs.get("reply_message_id")
+            turn = self.get_turn((kwargs.get("message") or {}).get("session_id"), anchor)
+            if turn is not None:
+                turn.handled = True
+        except Exception:
+            pass
         message = kwargs.get("message") or {}
         if message.get("platform") != "qq":
             return {"action": "continue"}
@@ -673,6 +726,7 @@ class JinhuaPlugin(MaiBotPlugin):
                 "金桦出站放弃 msg_id=%s elapsed_ms=%s（超过 120s 硬上限）",
                 anchor, now - turn.received_ms,
             )
+            self.bump("send_dropped")
             return abort("回合超过硬上限")
         if now >= turn.expires_ms:
             try:

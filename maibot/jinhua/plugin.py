@@ -169,15 +169,18 @@ class JinhuaPlugin(MaiBotPlugin):
                 except Exception:
                     pass
 
+        marks = list(re.finditer(r"(EMOJI|TEXT)\s*[:：]", raw, re.I))
+        if not marks:
+            return None
         emoji, lines = "", []
-        for row in raw.splitlines():
-            match = re.match(r"^\s*(EMOJI|TEXT)\s*[:：]\s*(.+?)\s*$", row, re.I)
-            if not match:
+        for i, mark in enumerate(marks):
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(raw)
+            value = raw[mark.end():end].strip(" \t\n\r，,；;。")
+            if not value:
                 continue
-            key, value = match.group(1).upper(), match.group(2).strip()
-            if key == "EMOJI":
-                emoji = "" if value in {"-", "无", "空", "none", "None"} else value.strip("\"'")
-            elif value:
+            if mark.group(1).upper() == "EMOJI":
+                emoji = "" if value in {"-", "无", "空", "none", "None", "None."} else value.strip("\"'")
+            else:
                 lines.append(re.sub(r"\s+", " ", value))
         if not lines:
             return None
@@ -825,6 +828,8 @@ class JinhuaPlugin(MaiBotPlugin):
             return {"action": "continue"}
         anchor = message.get("reply_to") or kwargs.get("reply_message_id")
         turn = self.get_turn(message["session_id"], anchor) if anchor else None
+        if turn is None:
+            turn = self.get_turn(message["session_id"], None)
         if not turn:
             return abort("金桦出站需要当前会话的入站锚点")
         now = int(time.time() * 1000)
@@ -884,7 +889,9 @@ class JinhuaPlugin(MaiBotPlugin):
                 salvage = ["我这没组织好 再说一遍"]
             asyncio.create_task(self.deliver_plan(message["session_id"], {"emoji": "", "lines": salvage[:2]}, message))
             try:
-                self.ctx.logger.warning("金桦结构化回复解析失败，已按纯文本投递 lines=%s", salvage[:2])
+                self.ctx.logger.warning(
+                    "金桦结构化回复解析失败，已按纯文本投递 lines=%s 原文=%r", salvage[:2], plan_text[:160]
+                )
             except Exception:
                 pass
             return abort("结构化回复解析失败，已按纯文本投递")

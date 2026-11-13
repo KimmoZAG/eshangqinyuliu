@@ -153,23 +153,35 @@ class JinhuaPlugin(MaiBotPlugin):
 
 
     def parse_plan(self, text: str):
-        """解析 replyer 输出的 {"emoji":…, "lines":[…]}；不是这个格式就返回 None。"""
+        """解析 EMOJI/TEXT 行协议；同时兼容模型偶发输出的 JSON。"""
         raw = (text or "").strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw).strip()
-        start, end = raw.find("{"), raw.rfind("}")
-        if start == -1 or end <= start:
-            return None
-        try:
-            data = json.loads(raw[start:end + 1])
-        except Exception:
-            return None
-        if not isinstance(data, dict):
-            return None
-        lines = [re.sub(r"\s+", " ", str(x)).strip() for x in (data.get("lines") or []) if str(x).strip()]
+
+        if raw.startswith("{"):
+            start, end = raw.find("{"), raw.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    data = json.loads(raw[start:end + 1])
+                    lines = [re.sub(r"\s+", " ", str(x)).strip() for x in (data.get("lines") or []) if str(x).strip()]
+                    if lines:
+                        return {"emoji": str(data.get("emoji") or "").strip(), "lines": lines[:3]}
+                except Exception:
+                    pass
+
+        emoji, lines = "", []
+        for row in raw.splitlines():
+            match = re.match(r"^\s*(EMOJI|TEXT)\s*[:：]\s*(.+?)\s*$", row, re.I)
+            if not match:
+                continue
+            key, value = match.group(1).upper(), match.group(2).strip()
+            if key == "EMOJI":
+                emoji = "" if value in {"-", "无", "空", "none", "None"} else value.strip("\"'")
+            elif value:
+                lines.append(re.sub(r"\s+", " ", value))
         if not lines:
             return None
-        return {"emoji": str(data.get("emoji") or "").strip(), "lines": lines[:3]}
+        return {"emoji": emoji, "lines": lines[:3]}
 
     async def deliver_plan(self, session: str, plan: dict, message: dict) -> None:
         """按计划发送：先图，再逐条文字。"""
@@ -677,15 +689,17 @@ class JinhuaPlugin(MaiBotPlugin):
             names = []
         if names:
             special = "；".join(f"{tag}={desc}" for tag, desc in EMOJI_SEMANTICS.items() if tag in names)
-            prompt += (
-                "\n\n【输出格式】只输出一个 JSON 对象，不要代码块、不要解释："
-                '{"emoji":"标签或空","lines":["第一段","第二段"]}'
-                "。lines 1 到 3 条，每条一句话、不超过 40 字，按发送顺序排。"
-                "emoji 从下面的标签里选一个，大多数回复都该配；不想配就填空字符串。"
-                "\n【表情用法】" + (special + "；" if special else "")
-                + "其余标签按情绪选：反常理就配，别连着两条用同一个。"
-                "\n可用标签：" + "、".join(names)
+            fmt = (
+                "【输出格式】严格按行输出，不要 JSON、不要代码块、不要解释：\n"
+                "EMOJI: 标签名（不配就写 -）\n"
+                "TEXT: 第一句\n"
+                "TEXT: 第二句（可选，最多三条）\n"
+                "每行一句话、不超过 40 字，不要写别的字段。\n"
+                "【表情用法】" + (special + "；" if special and names else "")
+                + "其余标签按情绪挑，别连着两条用同一个。大多数回复都该配一个。\n"
+                "可用标签：" + "、".join(names) + "\n\n"
             )
+            prompt = fmt + prompt.strip()
         if roster:
             prompt += (
                 " 群里已经认出来的真人："
@@ -858,11 +872,21 @@ class JinhuaPlugin(MaiBotPlugin):
             plan = self.parse_plan(plan_text)
         except Exception:
             plan = None
-        if not plan and plan_text.strip().startswith("{") and '"lines"' in plan_text:
+        looks_plan = '"lines"' in plan_text or re.search(r"^\s*(EMOJI|TEXT)\s*[:：]", plan_text, re.M)
+        if not plan and looks_plan:
             turn.handled = True
-            salvage = [x for x in re.findall(r'"([^"\\]{2,60})"', plan_text) if x not in {"emoji", "lines"}]
-            if salvage:
-                asyncio.create_task(self.deliver_plan(message["session_id"], {"emoji": "", "lines": salvage[:2]}, message))
+            salvage = [re.sub(r"\s+", " ", m.group(1)).strip()
+                       for m in re.finditer(r"^\s*TEXT\s*[:：]\s*(.+?)\s*$", plan_text, re.I | re.M)]
+            if not salvage:
+                salvage = [x for x in re.findall(r'"([^"\\]{2,60})"', plan_text) if x not in {"emoji", "lines"}]
+            self.bump("plan_parse_fail")
+            if not salvage:
+                salvage = ["我这没组织好 再说一遍"]
+            asyncio.create_task(self.deliver_plan(message["session_id"], {"emoji": "", "lines": salvage[:2]}, message))
+            try:
+                self.ctx.logger.warning("金桦结构化回复解析失败，已按纯文本投递 lines=%s", salvage[:2])
+            except Exception:
+                pass
             return abort("结构化回复解析失败，已按纯文本投递")
         if plan:
             turn.handled = True

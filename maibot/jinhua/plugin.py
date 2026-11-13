@@ -542,7 +542,8 @@ class JinhuaPlugin(MaiBotPlugin):
             if turn.topic:
                 hint += " 当前是管理员请求话题，请对当前消息回一条自然的开黑话头。"
             try:
-                self.trim_history(kwargs["items"])
+                keep = int(os.environ.get("JINHUA_HISTORY_LIMIT", "50"))
+                self.trim_history(kwargs["items"], keep=max(6, keep))
             except Exception:
                 pass
             block = hint.strip()
@@ -632,8 +633,9 @@ class JinhuaPlugin(MaiBotPlugin):
             names = []
         if names:
             prompt += (
-                " 想配一张表情时，在回复里单独写一个 [[标签]]（系统会换成图片，标签本身不会显示）。"
-                "可用标签：" + "、".join(names) + "。一条最多一个，别每条都配。"
+                " 想配表情就在回复里写一个 [[标签]]（系统会换成一张图，标签本身不会显示，前后别加换行）。"
+                "情绪明显、想怼人、想卖乖的时候都可以用，平均每两三条回复来一个没问题。"
+                "同一个标签别连着用，可用标签：" + "、".join(names) + "。"
             )
         if roster:
             prompt += (
@@ -747,8 +749,10 @@ class JinhuaPlugin(MaiBotPlugin):
         for seg in segments:
             if seg.get("type") == "text" and isinstance(seg.get("data"), str):
                 cleaned = clean(seg["data"])
+                cleaned = re.sub(r"\s*\n+\s*", " ", cleaned)   # 一条消息里不留换行
+                cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
                 if cleaned != seg["data"]:
-                    seg["data"] = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+                    seg["data"] = cleaned
         return dropped[0]
 
     @HookHandler("send_service.before_send", mode=HookMode.BLOCKING)

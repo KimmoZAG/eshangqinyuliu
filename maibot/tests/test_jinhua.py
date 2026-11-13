@@ -341,7 +341,7 @@ class PlanDeliveryTests(unittest.IsolatedAsyncioTestCase):
         result = await JinhuaPlugin.before_send(plugin, message=message)
         self.assertEqual(result["action"], "continue")
         self.assertEqual(message["raw_message"][0]["data"], "第一句")
-        self.assertEqual(plugin._pending_lines["s"], ["第二句"])
+        self.assertEqual(plugin._pending_lines["msg1"], ["第二句"])
         self.assertTrue(turn.handled)
 
     async def test_single_line_protocol_is_parsed(self):
@@ -351,3 +351,74 @@ class PlanDeliveryTests(unittest.IsolatedAsyncioTestCase):
         plan = JinhuaPlugin.parse_plan(plugin, "EMOJI: 白眼 TEXT: 猪就猪吧 TEXT: 先说说一血")
         self.assertEqual(plan["emoji"], "白眼")
         self.assertEqual(plan["lines"], ["猪就猪吧", "先说说一血"])
+
+
+class FallbackGuardTests(unittest.TestCase):
+    """同一会话的兜底必须只发生一次：多条 @ 并发时不能连环补话。"""
+
+    def _plugin(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = SimpleNamespace(
+            latest={}, _last_outbound={}, _fallback_at={},
+        )
+        return plugin
+
+    def test_three_at_messages_only_one_fallback(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = self._plugin()
+        turns = [SimpleNamespace(anchor=f"m{i}", handled=False, fallback_sent=False) for i in range(3)]
+        plugin.latest["s"] = "m2"            # 最新是第三条，前两条应被接管
+        self.assertFalse(JinhuaPlugin.can_fallback(plugin, "s", turns[0]))
+        self.assertFalse(JinhuaPlugin.can_fallback(plugin, "s", turns[1]))
+        self.assertTrue(JinhuaPlugin.can_fallback(plugin, "s", turns[2]))
+
+        plugin._fallback_at["s"] = time.time()   # 刚兜过一次
+        self.assertFalse(JinhuaPlugin.can_fallback(plugin, "s", turns[2]))
+
+    def test_recent_outbound_suppresses_fallback(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = self._plugin()
+        plugin.latest["s"] = "m1"
+        plugin._last_outbound["s"] = time.time() - 1
+        turn = SimpleNamespace(anchor="m1", handled=False, fallback_sent=False)
+        self.assertFalse(JinhuaPlugin.can_fallback(plugin, "s", turn))
+
+
+class ConcurrencyStateTests(unittest.TestCase):
+    def test_send_lock_is_per_session(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = SimpleNamespace(_send_locks={})
+        first = JinhuaPlugin.send_lock(plugin, "group-a")
+        again = JinhuaPlugin.send_lock(plugin, "group-a")
+        other = JinhuaPlugin.send_lock(plugin, "group-b")
+        self.assertIs(first, again)
+        self.assertIsNot(first, other)
+
+
+class MergeWindowTests(unittest.TestCase):
+    def test_second_mention_within_window_takes_over(self):
+        from jinhua.plugin import JinhuaPlugin
+        from jinhua.turn import Turn
+
+        plugin = SimpleNamespace(bump=lambda key: None)
+        early = Turn("m1", "u1", "g", "甲", True, "auto", 1000)
+        later = Turn("m2", "u2", "g", "乙", True, "auto", 1800)
+        plugin.turns = {("g", "m1"): early, ("g", "m2"): later}
+        self.assertTrue(JinhuaPlugin.merge_previous(plugin, "g", "m1", later))
+        self.assertTrue(early.handled)
+        self.assertTrue(early.fallback_sent)
+
+    def test_outside_window_keeps_both(self):
+        from jinhua.plugin import JinhuaPlugin
+        from jinhua.turn import Turn
+
+        plugin = SimpleNamespace(bump=lambda key: None)
+        early = Turn("m1", "u1", "g", "甲", True, "auto", 1000)
+        late = Turn("m2", "u2", "g", "乙", True, "auto", 9000)
+        plugin.turns = {("g", "m1"): early, ("g", "m2"): late}
+        self.assertFalse(JinhuaPlugin.merge_previous(plugin, "g", "m1", late))
+        self.assertFalse(early.handled)

@@ -93,6 +93,12 @@ class JinhuaPlugin(MaiBotPlugin):
         self.latest: dict[str, str] = {}
         self.active_tools: dict[str, tuple[str, set[str]]] = {}
         self.registrations: dict[tuple[str, str], int] = {}
+        self._inbound: dict[str, dict] = {}
+        self._pending_lines: dict[str, list[str]] = {}
+        self._internal_sends: set[str] = set()
+        self._last_outbound: dict[str, float] = {}
+        self._fallback_at: dict[str, float] = {}
+        self._send_locks: dict[str, asyncio.Lock] = {}
         images = self.ctx.paths.data_dir / "images"
         try:
             count = len(list(images.glob("*.png")))
@@ -187,21 +193,6 @@ class JinhuaPlugin(MaiBotPlugin):
             return None
         return {"emoji": emoji, "lines": lines[:3]}
 
-    async def deliver_plan(self, session: str, plan: dict, message: dict) -> None:
-        """按计划发送：先图，再逐条文字；都挂在入站消息的被动回复额度上。"""
-        anchor = getattr(self, "_inbound", {}).get(session) or message
-        try:
-            if plan.get("emoji"):
-                await self.push_emoji(session, [plan["emoji"]], anchor)
-            for line in plan["lines"]:
-                await self.ctx.send.text(line, session, reply_message=anchor)
-                await asyncio.sleep(1.2)
-        except Exception as exc:
-            try:
-                self.ctx.logger.warning("金桦结构化发送失败 %s", exc)
-            except Exception:
-                pass
-
     def bump(self, key: str) -> None:
         try:
             path = self.ctx.paths.data_dir / "health.json"
@@ -212,14 +203,55 @@ class JinhuaPlugin(MaiBotPlugin):
         except Exception:
             pass
 
+    def merge_previous(self, session: str, anchor: str, turn: Turn) -> bool:
+        """2 秒内的多条 @ 由最后一轮统一回答：前面那条标记已处理，不再各自兜底。"""
+        try:
+            window = int(os.environ.get("JINHUA_MERGE_WINDOW_MS", "2000"))
+        except Exception:
+            window = 2000
+        previous = self.turns.get((session, anchor))
+        if previous is None or previous.anchor == turn.anchor:
+            return False
+        if not getattr(previous, "explicit", False):
+            return False
+        if turn.received_ms - previous.received_ms >= window:
+            return False
+        previous.handled = True
+        previous.fallback_sent = True
+        self.bump("merged_turns")
+        return True
+
+    def send_lock(self, session: str) -> asyncio.Lock:
+        """每个会话一把锁：同一回合的图 + 多句必须成组发出，避免两个回合交错。"""
+        locks = getattr(self, "_send_locks", None)
+        if locks is None:
+            locks = self._send_locks = {}
+        if session not in locks:
+            locks[session] = asyncio.Lock()
+        return locks[session]
+
+    def can_fallback(self, session: str, turn) -> bool:
+        """兜底前检查：已在回、已被更新回合接管、或刚兜过，都不再补话。"""
+        now = time.time()
+        if getattr(turn, "handled", False) or getattr(turn, "fallback_sent", False):
+            return False
+        if now - self._last_outbound.get(session, 0) < 5:
+            return False
+        if (self.latest.get(session) or turn.anchor) != turn.anchor:
+            return False
+        if now - self._fallback_at.get(session, 0) < 60:
+            return False
+        return True
+
     def arm_watchdog(self, session: str, turn: Turn, message: dict, delay: float = 20.0) -> None:
         """回合兜底：到点还没发出任何消息，就补一句，绝不让对方干等。"""
 
         async def wait() -> None:
             await asyncio.sleep(delay)
-            if getattr(turn, "handled", False) or getattr(turn, "fallback_sent", False):
+            if not self.can_fallback(session, turn):
                 return
             turn.fallback_sent = True
+            self._fallback_at[session] = time.time()
             self.bump("fallback_sent")
             try:
                 self.ctx.logger.warning("金桦兜底发言 session=%s anchor=%s", session[:12], turn.anchor[:14])
@@ -379,10 +411,16 @@ class JinhuaPlugin(MaiBotPlugin):
             except Exception:
                 pass
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
+        prev_anchor = getattr(self, "latest", {}).get(session)
         self.remember(session, turn)
+        if addressed and prev_anchor:
+            try:
+                self.merge_previous(session, prev_anchor, turn)
+            except Exception:
+                pass
         # 补发（图/多段文字）时用它当被动回复锚点
         self._inbound = getattr(self, "_inbound", {})
-        self._inbound[session] = {
+        self._inbound[turn.anchor] = {
             "platform": message.get("platform"),
             "session_id": session,
             "message_id": message["message_id"],
@@ -580,7 +618,18 @@ class JinhuaPlugin(MaiBotPlugin):
                 # 第一段只判定“要不要接话”，不给记忆/画像工具，降 token 与时延
                 allowed.discard("query_memory")
                 allowed.discard("query_person_profile")
-            if lookup_items and policy.get("tools", True) and turn.needs_lookup and int(time.time() * 1000) < turn.lookup_deadline_ms:
+            try:
+                budget = int(os.environ.get("JINHUA_TOOL_BUDGET_MS", "8000"))
+            except Exception:
+                budget = 8000
+            tool_deadline = min(turn.lookup_deadline_ms, turn.received_ms + budget)
+            if (
+                lookup_items
+                and policy.get("tools", True)
+                and turn.needs_lookup
+                and turn.lookup_attempts < 1          # 只给一次机会，避免反复重查
+                and int(time.time() * 1000) < tool_deadline
+            ):
                 allowed.add("jinhua_lookup")
         tools = []
         for tool in kwargs["tool_definitions"]:
@@ -937,7 +986,8 @@ class JinhuaPlugin(MaiBotPlugin):
             except Exception:
                 probability = 0.45
             if plan.get("emoji") and random.random() < probability:
-                await self.push_emoji(message["session_id"], [plan["emoji"]], message)
+                async with self.send_lock(message["session_id"]):
+                    await self.push_emoji(message["session_id"], [plan["emoji"]], message)
             first = lines[0]
             for seg in segments:
                 if seg.get("type") == "text":
@@ -946,7 +996,7 @@ class JinhuaPlugin(MaiBotPlugin):
             message["processed_plain_text"] = first
             if len(lines) > 1:
                 self._pending_lines = getattr(self, "_pending_lines", {})
-                self._pending_lines[message["session_id"]] = lines[1:]
+                self._pending_lines[turn.anchor] = lines[1:]
 
         tags = []
         for seg in segments:
@@ -1007,20 +1057,28 @@ class JinhuaPlugin(MaiBotPlugin):
             turn.lines += 1
             turn.media += int(any(seg.get("type") in {"image", "emoji"} for seg in message.get("raw_message", [])))
             turn.handled = True
+            self._last_outbound[message["session_id"]] = time.time()
             # 首句已送出，接着把计划里剩下的句子补发出去
-            pending = getattr(self, "_pending_lines", {}).pop(message["session_id"], None)
+            pending = getattr(self, "_pending_lines", {}).pop(turn.anchor, None)
             if pending:
-                asyncio.create_task(self.flush_lines(message["session_id"], pending, message))
+                asyncio.create_task(self.flush_lines(message["session_id"], turn.anchor, pending))
         return {"action": "continue"}
 
-    async def flush_lines(self, session: str, lines, message: dict) -> None:
-        anchor = getattr(self, "_inbound", {}).get(session) or message
+    async def flush_lines(self, session: str, anchor: str, lines) -> None:
+        async with self.send_lock(session):
+            await self._flush_locked(session, anchor, lines)
+
+    async def _flush_locked(self, session: str, anchor: str, lines) -> None:
+        inbound = getattr(self, "_inbound", {}).get(anchor) or {
+            "platform": "qq", "session_id": session, "message_id": anchor,
+            "message_info": {}, "raw_message": [], "processed_plain_text": "",
+        }
         for line in lines:
             internal = getattr(self, "_internal_sends", set())
             internal.add(line)
             self._internal_sends = internal
             try:
-                await self.ctx.send.text(line, session, reply_message=anchor)
+                await self.ctx.send.text(line, session, reply_message=inbound)
             except Exception as exc:
                 try:
                     self.ctx.logger.warning("金桦补发失败 line=%s err=%s", line[:20], exc)

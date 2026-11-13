@@ -176,7 +176,7 @@ index 851a240..429f066 100644
      if not outbound:
          raise ValueError("出站消息为空")
 diff --git a/src/plugins/built_in/qq_official_adapter/plugin.py b/src/plugins/built_in/qq_official_adapter/plugin.py
-index b00ff5f..ae3a237 100644
+index b00ff5f..5c3542c 100644
 --- a/src/plugins/built_in/qq_official_adapter/plugin.py
 +++ b/src/plugins/built_in/qq_official_adapter/plugin.py
 @@ -1484,7 +1484,8 @@ class QQOfficialAdapterPlugin(MaiBotPlugin):
@@ -213,7 +213,7 @@ index b00ff5f..ae3a237 100644
                          base_path, binary, part["file_name"], file_type=part["file_type"]
                      )
 -                    body: Dict[str, Any] = {"msg_type": 7, "media": {"file_info": file_info}}
-+                    body: Dict[str, Any] = {"msg_type": 7, "content": " ", "media": {"file_info": file_info}}
++                    body: Dict[str, Any] = {"msg_type": 7, "content": "", "media": {"file_info": file_info}}
                  else:
                      body = part["body"]
                  # 引用样式只挂在第一条分片；message_reference 与被动凭证 msg_id/msg_seq 互不替代。

@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,6 +33,21 @@ function configure(action) {
 function checkedUpstream() {
   const actual = exec('git', ['-C', upstream, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: 'pipe' });
   if (actual !== revision) throw new Error('MaiBot 源码版本与固定版本不符 ' + revision);
+}
+
+function verifyPluginSync() {
+  const source = path.join(root, 'maibot', 'jinhua');
+  const target = path.join(instance, 'plugins', 'jinhua');
+  const drift = [];
+  for (const name of fs.readdirSync(source)) {
+    if (!/\.(py|json)$/.test(name)) continue;
+    const left = fs.readFileSync(path.join(source, name));
+    const rightPath = path.join(target, name);
+    if (!fs.existsSync(rightPath) || !left.equals(fs.readFileSync(rightPath))) drift.push(name);
+  }
+  if (drift.length) throw new Error('插件未同步到实例（先 configure）：' + drift.join(', '));
+  const digest = crypto.createHash('sha1').update(fs.readFileSync(path.join(source, 'plugin.py'))).digest('hex').slice(0, 8);
+  console.log('[金桦] 插件已同步，plugin.py sha1=' + digest);
 }
 
 function applyPatches() {
@@ -75,7 +91,9 @@ try {
       if (!fs.existsSync(path.join(instance, 'plugins', 'jinhua', 'legacy.json'))) {
         throw new Error('请先运行 install');
       }
+      configure('configure');
       configure(args.includes('--live-qq') ? 'live' : 'offline');
+      verifyPluginSync();
       exec(uv, ['run', '--no-sync', '--project', upstream, 'maibot', 'run', '--directory', instance]);
     } else {
       configure(command);

@@ -187,12 +187,13 @@ class JinhuaPlugin(MaiBotPlugin):
         return {"emoji": emoji, "lines": lines[:3]}
 
     async def deliver_plan(self, session: str, plan: dict, message: dict) -> None:
-        """按计划发送：先图，再逐条文字。"""
+        """按计划发送：先图，再逐条文字；都挂在入站消息的被动回复额度上。"""
+        anchor = getattr(self, "_inbound", {}).get(session) or message
         try:
             if plan.get("emoji"):
-                await self.push_emoji(session, [plan["emoji"]], message)
+                await self.push_emoji(session, [plan["emoji"]], anchor)
             for line in plan["lines"]:
-                await self.ctx.send.text(line, session, reply_message=message)
+                await self.ctx.send.text(line, session, reply_message=anchor)
                 await asyncio.sleep(1.2)
         except Exception as exc:
             try:
@@ -363,6 +364,16 @@ class JinhuaPlugin(MaiBotPlugin):
                 pass
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
         self.remember(session, turn)
+        # 补发（图/多段文字）时用它当被动回复锚点
+        self._inbound = getattr(self, "_inbound", {})
+        self._inbound[session] = {
+            "platform": message.get("platform"),
+            "session_id": session,
+            "message_id": message["message_id"],
+            "message_info": message.get("message_info", {}),
+            "raw_message": message.get("raw_message", []),
+            "processed_plain_text": message.get("processed_plain_text", ""),
+        }
         if addressed:
             try:
                 self.arm_watchdog(session, turn, message)
@@ -850,6 +861,10 @@ class JinhuaPlugin(MaiBotPlugin):
             turn = self.get_turn(message["session_id"], None)
         if not turn:
             return abort("金桦出站需要当前会话的入站锚点")
+        if not message.get("reply_to"):
+            message["reply_to"] = turn.anchor
+        if not kwargs.get("reply_message_id"):
+            kwargs["reply_message_id"] = turn.anchor
         now = int(time.time() * 1000)
 
         # 锚点可能指向一条更早的消息：若它已超时、而同一会话有更新的回合，改用最新回合

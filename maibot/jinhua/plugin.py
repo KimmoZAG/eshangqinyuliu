@@ -274,12 +274,30 @@ class JinhuaPlugin(MaiBotPlugin):
     async def push_emoji(self, session: str, tags, message) -> None:
         for tag in list(tags)[:2]:
             raw = self.emoji_file(tag)
-            if not raw:
-                continue
             try:
-                await self.ctx.send.emoji(raw, session, reply_message=message, sync_to_maisaka_history=False)
-            except Exception as exc:
-                self.ctx.logger.warning("金桦发表情失败 tag=%s err=%s", tag, exc)
+                self.ctx.logger.info("金桦发图开始 tag=%s bytes=%s", tag, len(raw))
+            except Exception:
+                pass
+            if not raw:
+                try:
+                    self.ctx.logger.warning("金桦发图跳过：素材不存在 tag=%s", tag)
+                except Exception:
+                    pass
+                continue
+            sent = False
+            for name, fn in (("image", getattr(self.ctx.send, "image", None)),
+                             ("emoji", getattr(self.ctx.send, "emoji", None))):
+                if fn is None:
+                    continue
+                try:
+                    await fn(raw, session, reply_message=message, sync_to_maisaka_history=False)
+                    sent = True
+                    self.ctx.logger.info("金桦发图成功 via=%s tag=%s", name, tag)
+                    break
+                except Exception as exc:
+                    self.ctx.logger.warning("金桦发图失败 via=%s tag=%s err=%s", name, tag, exc)
+            if not sent:
+                self.bump("emoji_fail")
 
     @HookHandler("chat.receive.after_process", mode=HookMode.BLOCKING)
     async def receive(self, **kwargs):

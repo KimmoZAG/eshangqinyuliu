@@ -408,6 +408,44 @@ class JinhuaPlugin(MaiBotPlugin):
         await self.say(message, response, history=name != "绑定")
         return True, "", True
 
+
+    def trim_history(self, items: list, keep: int = 8) -> int:
+        """只保留最近 keep 条原文消息，其余丢弃，避免 prompt 无限变长。"""
+        idx = []
+        for i, item in enumerate(items):
+            if item.get("item_type") != "UserMessageItem":
+                continue
+            parts = item.get("parts") or []
+            text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+            if text.startswith("<message"):
+                idx.append(i)
+        drop = idx[:-keep] if len(idx) > keep else []
+        for i in reversed(drop):
+            items.pop(i)
+        return len(drop)
+
+    async def recall(self, text: str, limit: int = 3) -> list[str]:
+        """fts5 检索旧记忆；没有 embedding 也能用，失败就当没有。"""
+        try:
+            result = await asyncio.wait_for(self.ctx.knowledge.search(text[:60], limit=limit), timeout=1.5)
+        except Exception:
+            return []
+        rows = []
+        if isinstance(result, dict):
+            rows = result.get("results") or result.get("items") or []
+        elif isinstance(result, list):
+            rows = result
+        out = []
+        for row in rows[:limit]:
+            if isinstance(row, dict):
+                line = row.get("text") or row.get("content") or row.get("summary") or ""
+            else:
+                line = str(row)
+            line = " ".join(str(line).split())
+            if line:
+                out.append(line[:120])
+        return out
+
     @HookHandler("maisaka.planner.before_request", mode=HookMode.BLOCKING)
     async def planner(self, **kwargs):
         session = kwargs["session_id"]
@@ -438,6 +476,10 @@ class JinhuaPlugin(MaiBotPlugin):
         lookup_items = turn.lookup_items
         if not quiet and not (ordinary and turn.handled):
             allowed.update({"reply", "read_tool_result", "query_memory", "query_person_profile"})
+            if not turn.explicit:
+                # 第一段只判定“要不要接话”，不给记忆/画像工具，降 token 与时延
+                allowed.discard("query_memory")
+                allowed.discard("query_person_profile")
             if lookup_items and policy.get("tools", True) and turn.needs_lookup and int(time.time() * 1000) < turn.lookup_deadline_ms:
                 allowed.add("jinhua_lookup")
         tools = []
@@ -499,10 +541,20 @@ class JinhuaPlugin(MaiBotPlugin):
                 hint += "\n下列查询项的 text 保留原句，别改写。" + " / ".join(lookup_items)
             if turn.topic:
                 hint += " 当前是管理员请求话题，请对当前消息回一条自然的开黑话头。"
-            for item in kwargs["items"]:
-                if item.get("item_type") == "SystemMessageItem":
-                    item["parts"].append({"type": "text", "text": hint})
-                    break
+            try:
+                self.trim_history(kwargs["items"])
+            except Exception:
+                pass
+            block = hint.strip()
+            try:
+                lines = await self.recall(turn.text)
+            except Exception:
+                lines = []
+            if lines:
+                block += "\n\n[相关旧记忆]\n" + "\n".join("- " + line for line in lines)
+            items = kwargs["items"]
+            tail = {"item_type": "UserMessageItem", "parts": [{"type": "text", "text": block}]}
+            items.insert(max(0, len(items) - 1), tail)
         return {"action": "continue", "modified_kwargs": kwargs}
 
     @HookHandler("maisaka.planner.after_response", mode=HookMode.BLOCKING)

@@ -184,7 +184,7 @@ class JinhuaPlugin(MaiBotPlugin):
         if not name or len(name) > 80 or "/" in name or "\\" in name or name.startswith("."):
             return ""
         root = (self.ctx.paths.data_dir / "images").resolve()
-        for suffix in (".png", ".jpg", ".jpeg"):
+        for suffix in (".png", ".jpg", ".jpeg", ".gif"):
             path = (root / (name + suffix)).resolve()
             if path.parent == root and path.is_file() and path.stat().st_size <= 5 * 1024 * 1024:
                 data = path.read_bytes()
@@ -210,7 +210,7 @@ class JinhuaPlugin(MaiBotPlugin):
         if not name or "/" in name or "\\" in name or name.startswith("."):
             return ""
         root = (self.ctx.paths.data_dir / "images").resolve()
-        for suffix in (".png", ".jpg", ".jpeg"):
+        for suffix in (".png", ".jpg", ".jpeg", ".gif"):
             path = (root / (name + suffix)).resolve()
             if path.parent == root and path.is_file() and path.stat().st_size <= 5 * 1024 * 1024:
                 return base64.b64encode(path.read_bytes()).decode("ascii")
@@ -628,7 +628,11 @@ class JinhuaPlugin(MaiBotPlugin):
                 "别人拿他开涮时可以替他挡一句，轻损之后给他留台阶。"
             )
         try:
-            names = sorted(p.stem for p in (self.ctx.paths.data_dir / "images").glob("*.png"))[:30]
+            root = self.ctx.paths.data_dir / "images"
+            names = sorted({
+                p.stem for p in root.iterdir()
+                if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif"}
+            })[:40] if root.is_dir() else []
         except Exception:
             names = []
         if names:

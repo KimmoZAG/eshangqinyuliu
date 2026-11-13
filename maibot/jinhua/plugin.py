@@ -599,10 +599,6 @@ class JinhuaPlugin(MaiBotPlugin):
         message = kwargs.get("message") or {}
         if message.get("platform") != "qq":
             return {"action": "continue"}
-        queue = getattr(self, "_emoji_queue", {})
-        tags = queue.pop(message.get("session_id"), None)
-        if tags and kwargs.get("sent", True):
-            asyncio.create_task(self.push_emoji(message.get("session_id"), tags, message))
         text = message.get("processed_plain_text") or ""
         self.ctx.logger.info(
             "金桦出站完成 session=%s target=%s len=%s ok=%s",
@@ -690,6 +686,8 @@ class JinhuaPlugin(MaiBotPlugin):
         if turn.group and not turn.explicit and not self.adaptive(turn.group):
             return abort("当前群处于仅点名或静默时段")
         segments = message.get("raw_message", [])
+        if segments and not any(seg.get("type") == "text" for seg in segments):
+            return {"action": "continue"}  # 纯媒体（补发的表情图）：不再走判定，避免递归拦截
         try:
             dropped = self.sanitize_emoji(segments)
         except Exception:
@@ -703,12 +701,11 @@ class JinhuaPlugin(MaiBotPlugin):
                     tags.extend(found)
                     seg["data"] = EMOJI_TOKEN.sub("", seg["data"]).strip()
         if tags:
-            self._emoji_queue = getattr(self, "_emoji_queue", {})
-            self._emoji_queue[message["session_id"]] = tags
+            # 先发图，再发文字：图片单独成条，失败也不影响后面的文字
+            await self.push_emoji(message["session_id"], tags, message)
             if not any(isinstance(seg.get("data"), str) and seg["data"].strip()
                        for seg in segments if seg.get("type") == "text"):
-                asyncio.create_task(self.push_emoji(message["session_id"], tags, message))
-                return abort("只有表情，改为直接发图")
+                return abort("只有表情，已单独发图")
         if dropped:
             try:
                 self.ctx.logger.info("金桦出站清理不兼容表情 %d 个 mode=%s", dropped, os.environ.get("EMOJI_MODE") or "safe")

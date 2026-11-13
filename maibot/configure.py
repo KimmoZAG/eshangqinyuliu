@@ -134,7 +134,8 @@ def configure(root: Path, instance: Path, node: Path, node_proxy: bool, *, legac
             name = "jinhua-" + task
             models.append({"name": name, "model_type": "llm", "model_identifier": identifier, "api_provider": provider})
             set_values(model_config, ("model_task_config", task), {
-                "model_list": [name], "selection_strategy": "sequential", "hard_timeout": 12.0,
+                "model_list": [name], "selection_strategy": "sequential",
+                "hard_timeout": float(os.environ.get("JINHUA_TASK_TIMEOUT", "30")),
             })
         for env_var in ("JINHUA_FAST_MODEL", "JINHUA_DEEP_MODEL"):
             identifier = os.getenv(env_var)

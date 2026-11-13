@@ -769,7 +769,7 @@ class JinhuaPlugin(MaiBotPlugin):
                 return abort("回复没有可发送内容")
             answer = "刚才卡了一下 你再说一句"
         else:
-            kwargs["enable_splitter"] = len(answer) >= 45
+            kwargs["enable_splitter"] = False  # 计划文本由插件按 TEXT 行切分，避免上游按长度拆碎
         kwargs["enable_chinese_typo"] = False
         kwargs["response"] = answer
         return {"action": "continue", "modified_kwargs": kwargs}

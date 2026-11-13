@@ -305,3 +305,49 @@ class InstalledUpstreamTests(unittest.IsolatedAsyncioTestCase):
         expired = await QQOfficialAdapterPlugin.handle_qq_official_gateway(adapter, payload)
         self.assertFalse(expired["success"])
         adapter._api_post.assert_not_awaited()
+
+
+class PlanDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    """计划消息必须改写后继续发送，不能 abort——abort 会让上游判定“回复未生成”而无限重排。"""
+
+    def _plugin(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        now = int(time.time() * 1000)
+        turn = SimpleNamespace(
+            anchor="msg1", group="g", explicit=True, received_ms=now,
+            expires_ms=now + 15000, lines=0, media=0, handled=False, mode="auto",
+            evidence={}, lookup_items=[],
+        )
+        plugin = SimpleNamespace(
+            state=SimpleNamespace(policy=lambda _: {}),
+            turns={}, active_tools={}, _inbound={}, _pending_lines={}, _internal_sends=set(),
+        )
+        plugin.get_turn = lambda session, anchor=None: turn
+        plugin.push_emoji = AsyncMock()
+        plugin.bump = lambda key: None
+        plugin.sanitize_emoji = lambda segs: 0
+        return plugin, turn
+
+    async def test_plan_rewrites_first_line_and_queues_rest(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin, turn = self._plugin()
+        message = {
+            "platform": "qq", "session_id": "s", "reply_to": "msg1",
+            "raw_message": [{"type": "text", "data": "EMOJI: -\nTEXT: 第一句\nTEXT: 第二句"}],
+            "processed_plain_text": "EMOJI: -\nTEXT: 第一句\nTEXT: 第二句",
+        }
+        result = await JinhuaPlugin.before_send(plugin, message=message)
+        self.assertEqual(result["action"], "continue")
+        self.assertEqual(message["raw_message"][0]["data"], "第一句")
+        self.assertEqual(plugin._pending_lines["s"], ["第二句"])
+        self.assertTrue(turn.handled)
+
+    async def test_single_line_protocol_is_parsed(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin, _ = self._plugin()
+        plan = JinhuaPlugin.parse_plan(plugin, "EMOJI: 白眼 TEXT: 猪就猪吧 TEXT: 先说说一血")
+        self.assertEqual(plan["emoji"], "白眼")
+        self.assertEqual(plan["lines"], ["猪就猪吧", "先说说一血"])

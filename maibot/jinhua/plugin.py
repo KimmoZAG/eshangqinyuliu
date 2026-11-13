@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import random
 import re
 import time
 from collections import OrderedDict
@@ -743,7 +744,9 @@ class JinhuaPlugin(MaiBotPlugin):
                 "TEXT: 第二句（可选，最多三条）\n"
                 "每行一句话、不超过 40 字，不要写别的字段。\n"
                 "【表情用法】" + (special + "；" if special and names else "")
-                + "其余标签按情绪挑，别连着两条用同一个。大多数回复都该配一个。\n"
+                + "其余标签按情绪挑，别连着两条用同一个。\n"
+                "不要每条都配表情：先看最近几条聊天，遇到嘲讽、被夸、有人发了离谱内容这类合适场景才配，"
+                "平均三四条里一条就够；普通接话、正经回答别配。\n"
                 "可用标签：" + "、".join(names) + "\n\n"
             )
             prompt = fmt + prompt.strip()
@@ -803,25 +806,6 @@ class JinhuaPlugin(MaiBotPlugin):
             ready = False
         self._emoji_ready = (now, ready)
         return ready
-
-    @HookHandler("send_service.after_send", mode=HookMode.BLOCKING)
-    async def after_send(self, **kwargs):
-        try:
-            anchor = (kwargs.get("message") or {}).get("reply_to") or kwargs.get("reply_message_id")
-            turn = self.get_turn((kwargs.get("message") or {}).get("session_id"), anchor)
-            if turn is not None:
-                turn.handled = True
-        except Exception:
-            pass
-        message = kwargs.get("message") or {}
-        if message.get("platform") != "qq":
-            return {"action": "continue"}
-        text = message.get("processed_plain_text") or ""
-        self.ctx.logger.info(
-            "金桦出站完成 session=%s target=%s len=%s ok=%s",
-            str(message.get("session_id"))[:12], str(kwargs.get("target_id") or "")[:12], len(text), kwargs.get("success", "?"),
-        )
-        return {"action": "continue"}
 
 
     # QQ 客户端对 Unicode emoji 支持有限。实测容易变方块的是三类：
@@ -920,33 +904,49 @@ class JinhuaPlugin(MaiBotPlugin):
             dropped = 0
 
         plan_text = "".join(seg.get("data", "") for seg in segments if seg.get("type") == "text")
+
+        # 插件自己补发的句子：直接放行，别再当成新计划解析一遍
+        internal = getattr(self, "_internal_sends", set())
+        if plan_text and plan_text in internal:
+            internal.discard(plan_text)
+            return {"action": "continue", "modified_kwargs": kwargs}
+
         plan = None
         try:
             plan = self.parse_plan(plan_text)
         except Exception:
             plan = None
-        looks_plan = '"lines"' in plan_text or re.search(r"^\s*(EMOJI|TEXT)\s*[:：]", plan_text, re.M)
-        if not plan and looks_plan:
-            turn.handled = True
+        if not plan and ('"lines"' in plan_text or re.search(r"^\s*(EMOJI|TEXT)\s*[:：]", plan_text, re.M)):
             salvage = [re.sub(r"\s+", " ", m.group(1)).strip()
                        for m in re.finditer(r"^\s*TEXT\s*[:：]\s*(.+?)\s*$", plan_text, re.I | re.M)]
             if not salvage:
                 salvage = [x for x in re.findall(r'"([^"\\]{2,60})"', plan_text) if x not in {"emoji", "lines"}]
             self.bump("plan_parse_fail")
-            if not salvage:
-                salvage = ["我这没组织好 再说一遍"]
-            asyncio.create_task(self.deliver_plan(message["session_id"], {"emoji": "", "lines": salvage[:2]}, message))
+            plan = {"emoji": "", "lines": salvage[:2] or ["我这没组织好 再说一遍"]}
             try:
-                self.ctx.logger.warning(
-                    "金桦结构化回复解析失败，已按纯文本投递 lines=%s 原文=%r", salvage[:2], plan_text[:160]
-                )
+                self.ctx.logger.warning("金桦计划解析失败，降级为纯文本 lines=%s 原文=%r", plan["lines"], plan_text[:160])
             except Exception:
                 pass
-            return abort("结构化回复解析失败，已按纯文本投递")
+
         if plan:
+            # 不走 abort：abort 会让上游认为“回复未生成”而无限重排，这里改写成本条消息 + 后续补发
             turn.handled = True
-            asyncio.create_task(self.deliver_plan(message["session_id"], plan, message))
-            return abort("结构化回复改由插件按段发送")
+            lines = plan["lines"]
+            try:
+                probability = float(os.environ.get("JINHUA_EMOJI_P", "0.45"))
+            except Exception:
+                probability = 0.45
+            if plan.get("emoji") and random.random() < probability:
+                await self.push_emoji(message["session_id"], [plan["emoji"]], message)
+            first = lines[0]
+            for seg in segments:
+                if seg.get("type") == "text":
+                    seg["data"] = ""
+            segments[:] = [{"type": "text", "data": first}]
+            message["processed_plain_text"] = first
+            if len(lines) > 1:
+                self._pending_lines = getattr(self, "_pending_lines", {})
+                self._pending_lines[message["session_id"]] = lines[1:]
 
         tags = []
         for seg in segments:
@@ -1002,14 +1002,32 @@ class JinhuaPlugin(MaiBotPlugin):
         turn = self.get_turn(message["session_id"], anchor) if anchor else None
         if turn and message.get("platform") == "qq":
             sent = bool(kwargs.get("sent"))
-            if turn.group and not turn.explicit:
-                self.ctx.logger.info("金桦接话发送 msg_id=%s sent=%s", anchor, sent)
             if not sent:
                 return {"action": "continue"}
             turn.lines += 1
             turn.media += int(any(seg.get("type") in {"image", "emoji"} for seg in message.get("raw_message", [])))
             turn.handled = True
+            # 首句已送出，接着把计划里剩下的句子补发出去
+            pending = getattr(self, "_pending_lines", {}).pop(message["session_id"], None)
+            if pending:
+                asyncio.create_task(self.flush_lines(message["session_id"], pending, message))
         return {"action": "continue"}
+
+    async def flush_lines(self, session: str, lines, message: dict) -> None:
+        anchor = getattr(self, "_inbound", {}).get(session) or message
+        for line in lines:
+            internal = getattr(self, "_internal_sends", set())
+            internal.add(line)
+            self._internal_sends = internal
+            try:
+                await self.ctx.send.text(line, session, reply_message=anchor)
+            except Exception as exc:
+                try:
+                    self.ctx.logger.warning("金桦补发失败 line=%s err=%s", line[:20], exc)
+                except Exception:
+                    pass
+                return
+            await asyncio.sleep(1.0)
 
 
 def create_plugin() -> JinhuaPlugin:

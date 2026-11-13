@@ -268,8 +268,23 @@ class JinhuaPlugin(MaiBotPlugin):
         root = (self.ctx.paths.data_dir / "images").resolve()
         for suffix in (".png", ".jpg", ".jpeg", ".gif"):
             path = (root / (name + suffix)).resolve()
-            if path.parent == root and path.is_file() and path.stat().st_size <= 5 * 1024 * 1024:
-                return base64.b64encode(path.read_bytes()).decode("ascii")
+            if path.parent == root and path.is_file():
+                raw = path.read_bytes()
+                # 超过 512KB 的动图在 QQ 里容易出问题，转成首帧 PNG
+                if path.suffix.lower() == ".gif" and len(raw) > 512 * 1024:
+                    try:
+                        import io
+
+                        from PIL import Image
+
+                        buffer = io.BytesIO()
+                        Image.open(io.BytesIO(raw)).convert("RGBA").save(buffer, format="PNG")
+                        self.bump("gif_shrunk")
+                        return base64.b64encode(buffer.getvalue()).decode("ascii")
+                    except Exception:
+                        pass
+                if len(raw) <= 5 * 1024 * 1024:
+                    return base64.b64encode(raw).decode("ascii")
         return ""
 
     async def push_emoji(self, session: str, tags, message) -> None:

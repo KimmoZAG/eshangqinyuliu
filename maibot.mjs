@@ -10,7 +10,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const directory = path.resolve(process.env.JINHUA_MAIBOT_DIR || 'data/maibot');
 const upstream = path.join(directory, 'node_modules', 'maibot-upstream');
 const instance = path.join(directory, 'instance');
-const patches = ['qq-delivery.patch', 'adaptive-planner.patch'];
+const patchFile = 'upstream.patch';
 const uv = process.env.JINHUA_UV || 'uv';
 const [command = 'help', ...args] = process.argv.slice(2);
 
@@ -50,12 +50,28 @@ function verifyPluginSync() {
   console.log('[金桦] 插件已同步，plugin.py sha1=' + digest);
 }
 
+// 幂等打补丁：标记文件记录「上游 commit + 补丁指纹」。
+// 状态不符就整体回滚重打，失败也回滚，保证工作区永远是干净或完整应用二选一。
 function applyPatches() {
-  const gitArgs = ['-C', upstream, 'apply'];
-  for (const filename of patches) {
-    const patch = path.join(root, 'maibot', filename);
-    const reverse = spawnSync('git', [...gitArgs, '--reverse', '--check', patch], { stdio: 'ignore' });
-    if (reverse.status !== 0) exec('git', [...gitArgs, patch]);
+  const patch = path.join(root, 'maibot', patchFile);
+  const digest = crypto.createHash('sha1').update(fs.readFileSync(patch)).digest('hex').slice(0, 12);
+  const head = exec('git', ['-C', upstream, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: 'pipe' });
+  const marker = path.join(upstream, '.jinhua-patch');
+  const stamp = head + ':' + digest;
+  const dirty = spawnSync('git', ['-C', upstream, 'diff', '--quiet']).status !== 0;
+
+  if (dirty && fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').trim() === stamp) {
+    return; // 已是目标状态
+  }
+
+  exec('git', ['-C', upstream, 'checkout', '--', '.']);
+  if (fs.existsSync(marker)) fs.rmSync(marker);
+  try {
+    exec('git', ['-C', upstream, 'apply', patch]);
+    fs.writeFileSync(marker, stamp + '\n');
+  } catch (error) {
+    exec('git', ['-C', upstream, 'checkout', '--', '.']);
+    throw new Error('上游补丁应用失败（已回滚）：' + error.message);
   }
 }
 

@@ -1,8 +1,11 @@
 #!/bin/sh
-# 守护启动：在线模式（--live-qq），进程退出 5 秒后自动拉起
+# 守护启动：在线模式（--live-qq），退出 5 秒后自动拉起
+# 启动前先做依赖自检（node/uv/ssh），保证容器重建后也能直接起来
 cd "$(dirname "$0")" || exit 1
 export TZ=Asia/Shanghai
-mkdir -p logs
+mkdir -p logs data
+
+sh ./ensure-runtime.sh >> logs/runtime.log 2>&1
 
 while true; do
   if [ -f .env ]; then

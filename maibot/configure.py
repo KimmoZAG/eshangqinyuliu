@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -67,14 +69,26 @@ def configure(root: Path, instance: Path, node: Path, node_proxy: bool, *, legac
 
     bot_file = instance / "config" / "bot_config.toml"
     bot = load(bot_file)
+    persona_file = plugin / "persona.json"
+    profile = read_json(persona_file, {})
+    if profile:
+        digest = hashlib.sha1(
+            json.dumps(profile, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:12]
+        if first_run or plugin_config.get("persona_sha") != digest:
+            set_values(bot, ("personality",), {
+                **{key: profile[key] for key in ("personality", "behavior_style", "reply_style", "multiple_probability")},
+                "selected_profile": profile["name"], "profiles": [profile],
+            })
+            set_values(bot, ("chat", "reply_style"), {
+                key: profile[key] for key in ("group_chat_prompt", "private_chat_prompts")
+            })
+            plugin_config["persona_sha"] = digest
+            save(plugin / "config.toml", plugin_config)
+            print("人设已同步", digest)
+
     if first_run:
-        profile = read_json(plugin / "persona.json", {})
         set_values(bot, ("bot",), {"nickname": "金桦", "alias_names": ["金桦", "金桦（黄石版）"]})
-        set_values(bot, ("personality",), {
-            **{key: profile[key] for key in ["personality", "behavior_style", "reply_style", "multiple_probability"]},
-            "selected_profile": profile["name"], "profiles": [profile],
-        })
-        set_values(bot, ("chat", "reply_style"), {key: profile[key] for key in ("group_chat_prompt", "private_chat_prompts")})
         set_values(bot, ("chat", "reply_timing"), {
             "talk_value": 0.45, "message_debounce_mode": "fast", "private_message_debounce_mode": "fast",
             "inevitable_at_reply": True, "mentioned_bot_reply": True,

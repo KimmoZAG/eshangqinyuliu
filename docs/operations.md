@@ -111,6 +111,7 @@ git -C data/maibot/node_modules/maibot-upstream diff > maibot/upstream.patch
 4. ./start.sh
 5. 验证：grep "已加载=1（jinhua" logs/maibot-live.log | tail -1
 6. 验证连接：netstat -tnp | grep 111.31 | grep ESTABLISHED
+7. 新机器还要重建表情素材（`data/` 不入库），见 [emoji.md](emoji.md#8-新机器如何重建素材data-不入库)
 ```
 
 如果上游目录被改坏（例如手工改过），直接重置再启动：

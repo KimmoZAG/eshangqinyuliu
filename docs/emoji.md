@@ -106,3 +106,60 @@ cp xxx.png data/maibot/instance/data/plugins/jinhua.chat/images/无语2.png
 # 3. 验证标签已出现在提示词
 ls -t data/maibot/instance/logs/maisaka_prompt/replyer/qq_group_*/*.json | head -1
 ```
+
+## 8. 新机器如何重建素材（data/ 不入库）
+
+表情素材放在 `data/` 下，被 `.gitignore` 忽略。**新 clone 的仓库里没有这些图**，需要按下面的方式重建。
+
+### 8.1 24 个 Twemoji 素材
+
+来自 npm 包 `emoji-datasource-twitter`（CC-BY 4.0）的 64px PNG：
+
+```bash
+cd /tmp && rm -rf emojipack && mkdir emojipack && cd emojipack
+npm pack emoji-datasource-twitter --silent
+tar xzf *.tgz
+DEST=/path/to/repo/data/maibot/instance/data/plugins/jinhua.chat/images
+mkdir -p "$DEST"
+
+python3 - <<'EOF'
+import shutil
+src = '/tmp/emojipack/package/img/twitter/64'
+dst = '/path/to/repo/data/maibot/instance/data/plugins/jinhua.chat/images'
+mapping = {
+  '笑':'1f602','微笑':'1f60a','赞':'1f44d','踩':'1f44e','哭':'1f62d','无语':'1f611',
+  '白眼':'1f644','狗头':'1f436','ok':'1f44c','震惊':'1f631','火':'1f525','强':'1f4aa',
+  '思考':'1f914','汗':'1f605','坏笑':'1f608','亲':'1f618','酷':'1f60e','睡':'1f634',
+  '怒':'1f621','鼓掌':'1f44f','握手':'1f91d','加油':'1f64c','摊手':'1f937','委屈':'1f97a',
+}
+for name, code in mapping.items():
+    shutil.copy(f'{src}/{code}.png', f'{dst}/{name}.png')
+print('copied', len(mapping))
+EOF
+```
+
+### 8.2 三个自定义素材
+
+这三张来自群主提供的原始图片，仓库里没有副本，**必须单独保管**：
+
+| 标签 | 原文件名 | 落库文件名 | 用途 |
+|---|---|---|---|
+| `眯眼笑` | `kim-smile.jpg`（实为 GIF） | `眯眼笑.gif` | 嘲讽群友 |
+| `有意思` | `something-interesting.jpg`（实为 GIF） | `有意思.gif` | 有人发离谱内容 |
+| `合适` | `very-suitable.jpg` | `合适.jpg` | 有人夸金桦 |
+
+建议在私有存储（网盘/对象存储）留一份备份，这是仓库之外唯一的原件。
+
+### 8.3 重建后自检
+
+```bash
+ls data/maibot/instance/data/plugins/jinhua.chat/images/ | wc -l   # 期望 27 个具名文件
+./stop.sh && ./start.sh
+grep "可用标签" -m1 <(sed 's/\x1b\[[0-9;]*m//g' logs/maibot-live.log) || true
+```
+
+标签列表是启动时扫描目录生成的，数量对不上说明文件没放对位置。
+
+### 8.4 为什么不做入库
+
+`data/` 包含消息库、绑定状态、日志和素材缓存，整体入库会带来无意义的冲突。如果将来要随仓库分发素材，正确做法是单开 `assets/emoji/` 目录并在启动时同步，而不是把 `data/` 部分放行。

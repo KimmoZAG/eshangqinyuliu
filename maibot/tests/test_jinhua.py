@@ -422,3 +422,25 @@ class MergeWindowTests(unittest.TestCase):
         plugin.turns = {("g", "m1"): early, ("g", "m2"): late}
         self.assertFalse(JinhuaPlugin.merge_previous(plugin, "g", "m1", late))
         self.assertFalse(early.handled)
+
+
+class ClicheGuardTests(unittest.TestCase):
+    def _plugin(self):
+        return SimpleNamespace(bump=lambda key: None, _phrase_hits={})
+
+    def test_third_use_of_same_phrase_is_dropped(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = self._plugin()
+        for _ in range(2):
+            kept = JinhuaPlugin.tame_lines(plugin, "s", ["上号啊"], gaming=True)
+            self.assertEqual(kept, ["上号啊"])
+        kept = JinhuaPlugin.tame_lines(plugin, "s", ["先上号再说"], gaming=True)
+        self.assertEqual(kept, ["嗯 那你说"])
+
+    def test_mention_without_game_context_is_dropped(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = self._plugin()
+        kept = JinhuaPlugin.tame_lines(plugin, "s", ["别研究了我上号"], gaming=False)
+        self.assertEqual(kept, ["嗯 那你说"])

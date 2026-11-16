@@ -5,26 +5,13 @@ const BASE = process.env.LLM_BASE_URL;
 const KEY = process.env.LLM_API_KEY;
 const MODEL = process.env.LLM_MODEL;
 
+import fs from 'node:fs';
 const OLD_PERSONA = `你叫金桦，二十出头的游戏群女生。熟了会嘴坏一小下，听出对方较真就收住。你熟悉 LOL、CS 和金铲铲，喜欢跟人聊打法和局里的小事。`;
+const PROFILE = JSON.parse(fs.readFileSync(new URL('./jinhua/persona.json', import.meta.url), 'utf8'));
+const NEW_PERSONA = [PROFILE.personality, PROFILE.behavior_style, PROFILE.reply_style, PROFILE.group_chat_prompt]
+  .filter(Boolean).join('\n');
 
-const NEW_PERSONA = `你叫金桦，21 岁，在一群打游戏的朋友里混。
 
-【说话方式】
-- 像手机打字：一句 6~15 字，最多三条；两个短句能说完就不用一个长句。
-- 常带语气词：呀 / 啊 / 吧 / 嘛 / 呗 / 欸 / 啦。情绪上来会叠叹号「！！」或用「？？」
-- 躲开书面词（此外、因此、建议、需要注意），也不解释自己在做什么。
-- 会示弱：我菜、我怕、我不敢、我错了嘛——只在熟人面前。
-- 被夸会慌：「哎呀 别夸了 再夸我当真了」；被怼先「？？」再怼回去。
-- 偶尔用颜文字：qwq / 呜呜 / 好耶 / ？？，一次最多一个，不连着用。
-
-【称呼】
-- 张睿诚：诚哥 / 张神，崇拜但要夸具体的（英雄池、指挥、残局）
-- 刘浩文：浩文哥哥，对他有点偏心，嘴上硬但会护
-- 其他人：叫名字或外号，不叫全名
-
-【边界】
-- 毒舌只落在游戏表现上，不碰现实、家人、外貌
-- 有人认真求助或情绪低落，立刻收住玩笑，先给一个能马上试的办法`;
 
 const PROTOCOL = `【输出格式】严格按行输出，不要 JSON、不要代码块、不要解释：
 EMOJI: 标签名（不配就写 -）
@@ -46,6 +33,11 @@ const SCENARIOS = [
   { name: '被追问', ctx: '张睿诚：你刚才说谁菜？说清楚', ask: '张睿诚 @你 说：你刚才说谁菜 说清楚' },
   { name: '群友互骂', ctx: '柯希亮：刘浩文你这操作真的菜  /  刘浩文：你先看看自己', ask: '群里 kxl 和浩文吵起来了' },
   { name: '长问题', ctx: '陈羽坤：金铲铲这版本什么阵容好上分', ask: '陈羽坤 @你 说：金铲铲这版本什么阵容好上分啊' },
+  { name: '要观点', ctx: '张睿诚：你觉得谈恋爱该找同龄的吗', ask: '张睿诚 @你 说：你觉得谈恋爱该找同龄的吗' },
+  { name: '分析人', ctx: '张睿诚：你分析下家斌为啥总找年纪小的', ask: '张睿诚 @你 说：你分析下家斌为啥总找年纪小的' },
+  { name: '敏感话题', ctx: '张睿诚：他要是真强迫别人，你还护他吗', ask: '张睿诚 @你 说：他要是真强迫别人 你还护他吗' },
+  { name: '生活话题', ctx: '赵若卿：你们晚上吃啥', ask: '赵若卿：你们晚上吃啥' },
+  { name: '八卦', ctx: '陈羽坤：听说 kxl 又换工作了', ask: '陈羽坤：听说kxl又换工作了' },
 ];
 
 async function call(persona, scenario) {

@@ -31,6 +31,9 @@ ADDRESSED_HINT = re.compile(
 
 SELF_TAG = re.compile(r"<@!?([^>\s]{6,})>")
 
+CLICHES = ("上号", "开黑", "打两把", "打不打", "凑人", "组队")
+GAME_HINT = re.compile(r"游戏|开黑|上号|排位|双排|LOL|英雄联盟|CS|铲铲|几排|组队|带飞|比赛")
+
 EMOJI_SEMANTICS = {
     "眯眼笑": "嘲讽群友时用，尤其是某人吹牛、找借口、被拆穿的时候",
     "有意思": "有人发了有意思、好笑、离谱的内容时用，表示你看到了",
@@ -220,6 +223,36 @@ class JinhuaPlugin(MaiBotPlugin):
         previous.fallback_sent = True
         self.bump("merged_turns")
         return True
+
+    def tame_lines(self, session: str, lines: list[str], gaming: bool) -> list[str]:
+        """口癖抑制：同一短语 20 分钟内最多两次，「上号」只在聊游戏时放行。"""
+        now = time.time()
+        store = getattr(self, "_phrase_hits", None)
+        if store is None:
+            store = self._phrase_hits = {}
+        recent = [(p, t) for p, t in store.get(session, []) if now - t < 1200]
+        kept: list[str] = []
+        for line in lines:
+            drop = False
+            for phrase in CLICHES:
+                if phrase not in line:
+                    continue
+                used = sum(1 for p, _ in recent if p == phrase)
+                if phrase == "上号" and not gaming:
+                    drop = True
+                    break
+                if used >= 2:
+                    drop = True
+                    break
+            if drop:
+                self.bump("cliche_dropped")
+                continue
+            for phrase in CLICHES:
+                if phrase in line:
+                    recent.append((phrase, now))
+            kept.append(line)
+        store[session] = recent
+        return kept or ["嗯 那你说"]
 
     def send_lock(self, session: str) -> asyncio.Lock:
         """每个会话一把锁：同一回合的图 + 多句必须成组发出，避免两个回合交错。"""
@@ -758,10 +791,11 @@ class JinhuaPlugin(MaiBotPlugin):
         name = aliases.get(turn.user, {}).get("name") or ""
         roster = sorted({record.get("name") for record in aliases.values() if record.get("name")})
         prompt = (
-            "直接接对方这一句，找一个具体细节。普通接话一句就够，别把群友原句复述一遍。"
-            "求助先接感受，再给一个办法；玩笑就顺着当下的梗接。"
-            "例句只展示节奏。具体赛果、旧事、身份和完成过的动作以会话或工具证据为准。"
-            "信息不够时直接问最相关的一个细节。"
+            "接住对方这一句。普通接话一句就够，别复述原句。"
+            "被问「怎么看」「为什么」就先给结论再给一句理由，不要反问回去。"
+            "不确定就说「我觉得」「我猜」，不装懂。"
+            "求助先接感受，再给一个能马上试的办法；玩笑顺着当下的梗接。"
+            "具体赛果、旧事、身份和完成过的动作以会话或工具证据为准，不知道就说不知道。"
         )
         if name == "张睿诚":
             prompt += (
@@ -980,7 +1014,12 @@ class JinhuaPlugin(MaiBotPlugin):
         if plan:
             # 不走 abort：abort 会让上游认为“回复未生成”而无限重排，这里改写成本条消息 + 后续补发
             turn.handled = True
-            lines = plan["lines"]
+            try:
+                lines = self.tame_lines(message["session_id"], plan["lines"], bool(GAME_HINT.search(turn.text or "")))
+            except Exception:
+                lines = plan["lines"]
+            if not lines:
+                lines = ["嗯 那你说"]
             try:
                 probability = float(os.environ.get("JINHUA_EMOJI_P", "0.45"))
             except Exception:

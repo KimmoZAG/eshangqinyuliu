@@ -157,6 +157,13 @@ def configure(root: Path, instance: Path, node: Path, node_proxy: bool, *, legac
                 name = "jinhua-" + ("fast" if env_var == "JINHUA_FAST_MODEL" else "deep")
                 models.append({"name": name, "model_type": "llm", "model_identifier": identifier, "api_provider": provider})
                 plugin_config["fast_model_name" if name.endswith("fast") else "deep_model_name"] = name
+        # 视觉任务：默认复用主模型（deepseek-flash 支持 image 输入）
+        vlm_identifier = os.getenv("JINHUA_VLM_MODEL") or model
+        models.append({"name": "jinhua-vlm", "model_type": "llm", "model_identifier": vlm_identifier, "api_provider": provider})
+        set_values(model_config, ("model_task_config", "vlm"), {
+            "model_list": ["jinhua-vlm"], "selection_strategy": "sequential",
+            "hard_timeout": 60.0,
+        })
         if embed := os.getenv("JINHUA_EMBEDDING_MODEL"):
             models.append({"name": "jinhua-embedding", "model_type": "embedding", "model_identifier": embed, "api_provider": provider})
             set_values(model_config, ("model_task_config", "embedding"), {"model_list": ["jinhua-embedding"]})

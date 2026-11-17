@@ -102,6 +102,8 @@ class JinhuaPlugin(MaiBotPlugin):
         self._last_outbound: dict[str, float] = {}
         self._fallback_at: dict[str, float] = {}
         self._send_locks: dict[str, asyncio.Lock] = {}
+        self._rounds: dict[str, int] = {}
+        self._emoji_round: dict[str, int] = {}
         images = self.ctx.paths.data_dir / "images"
         try:
             count = len(list(images.glob("*.png")))
@@ -223,6 +225,18 @@ class JinhuaPlugin(MaiBotPlugin):
         previous.fallback_sent = True
         self.bump("merged_turns")
         return True
+
+    def default_emoji(self) -> str:
+        """20 轮保底用的图：优先中性情绪，避免乱配。"""
+        for name in ("笑", "微笑", "思考", "无语", "狗头"):
+            if self.emoji_file(name):
+                return name
+        try:
+            root = self.ctx.paths.data_dir / "images"
+            files = [p.stem for p in root.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif"}]
+        except Exception:
+            files = []
+        return files[0] if files else ""
 
     def tame_lines(self, session: str, lines: list[str], gaming: bool) -> list[str]:
         """口癖抑制：同一短语 20 分钟内最多两次，「上号」只在聊游戏时放行。"""
@@ -446,6 +460,13 @@ class JinhuaPlugin(MaiBotPlugin):
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
         prev_anchor = getattr(self, "latest", {}).get(session)
         self.remember(session, turn)
+        try:
+            rounds = getattr(self, "_rounds", None)
+            if rounds is None:
+                rounds = self._rounds = {}
+            rounds[session] = rounds.get(session, 0) + 1
+        except Exception:
+            pass
         if addressed and prev_anchor:
             try:
                 self.merge_previous(session, prev_anchor, turn)
@@ -702,6 +723,9 @@ class JinhuaPlugin(MaiBotPlugin):
             )
             if ordinary:
                 hint += (
+                    "\n插话门槛：先问自己一句「这句我能补出具体的东西吗」——具体的数字、经历、判断、经历过的糗事。"
+                    "补不出来就 stop，不要为了接话而接话；牛头不对马嘴比不说话更糟。"
+                    "话题没落在你懂的范围内（打工、钱、租房、签证、澳洲生活、游戏、吃的、熬夜）时，默认旁观。"
                     "\n自适应接话：结合最近几轮，判断新消息是不是在对金桦说话。先看这句话当前在叫谁。"
                     "句首用其他人的称呼叫人，或明确 @、引用其他群友来对他说话，用 stop。"
                     "即使这个人刚刚还在和你聊天，或你刚问过他想试哪句，也别替被点到的人答或复述他的话。"
@@ -1024,9 +1048,26 @@ class JinhuaPlugin(MaiBotPlugin):
                 probability = float(os.environ.get("JINHUA_EMOJI_P", "0.45"))
             except Exception:
                 probability = 0.45
-            if plan.get("emoji") and random.random() < probability:
-                async with self.send_lock(message["session_id"]):
-                    await self.push_emoji(message["session_id"], [plan["emoji"]], message)
+            session = message["session_id"]
+            rounds = getattr(self, "_rounds", {})
+            emoji_round = getattr(self, "_emoji_round", None)
+            if emoji_round is None:
+                emoji_round = self._emoji_round = {}
+            try:
+                floor = int(os.environ.get("JINHUA_EMOJI_FLOOR_ROUNDS", "20"))
+            except Exception:
+                floor = 20
+            due = rounds.get(session, 0) - emoji_round.get(session, -floor) >= floor
+            tag = plan.get("emoji") or ""
+            if not tag and due:
+                try:
+                    tag = self.default_emoji()
+                except Exception:
+                    tag = ""
+            if tag and (due or random.random() < probability):
+                async with self.send_lock(session):
+                    await self.push_emoji(session, [tag], message)
+                emoji_round[session] = rounds.get(session, 0)
             first = lines[0]
             for seg in segments:
                 if seg.get("type") == "text":

@@ -36,6 +36,9 @@
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `SEARCH_ENABLED` | `0` | `1` 时挂载联网搜索工具 |
+| `SEARCH_PROVIDER` | `deepseek` | `deepseek`：服务端检索（带引用，慢 3~10s）；`anysearch`：轻量搜索 |
+| `SEARCH_DS_TIMEOUT_MS` | `15000` | DeepSeek 检索超时，超时自动回退 anysearch |
+| `JINHUA_TOOL_BUDGET_MS` | `20000` | 工具总预算，必须大于检索耗时 |
 | `EMOJI_MODE` | `safe` | `safe` / `strip` / `all`，见 [emoji.md](emoji.md) |
 | `JINHUA_EMOJI_P` | `0.45` | 带图概率闸门 |
 | `JINHUA_HISTORY_LIMIT` | `50` | 送进 planner 的历史消息条数上限 |

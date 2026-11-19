@@ -104,6 +104,7 @@ class JinhuaPlugin(MaiBotPlugin):
         self._send_locks: dict[str, asyncio.Lock] = {}
         self._rounds: dict[str, int] = {}
         self._speak_times: dict[str, list[float]] = {}
+        self._recent_says: dict[str, list[tuple[str, str]]] = {}
         self._emoji_round: dict[str, int] = {}
         images = self.ctx.paths.data_dir / "images"
         try:
@@ -495,6 +496,17 @@ class JinhuaPlugin(MaiBotPlugin):
             except Exception:
                 pass
         turn = Turn(message["message_id"], user, group, text, addressed, mode, int(time.time() * 1000))
+        try:
+            says = getattr(self, "_recent_says", None)
+            if says is None:
+                says = self._recent_says = {}
+            speaker = self.state.name(user) or message.get("message_info", {}).get("user_info", {}).get("user_cardname") or user[:6]
+            if text:
+                bucket = says.get(session, [])
+                bucket.append((speaker, text[:40]))
+                says[session] = bucket[-12:]
+        except Exception:
+            pass
         prev_anchor = getattr(self, "latest", {}).get(session)
         self.remember(session, turn)
         try:
@@ -915,6 +927,20 @@ class JinhuaPlugin(MaiBotPlugin):
                 "可用标签：" + "、".join(names) + "\n\n"
             )
             prompt = fmt + prompt.strip()
+        try:
+            recent = getattr(self, "_recent_says", {}).get(kwargs["session_id"], [])
+        except Exception:
+            recent = []
+        if recent:
+            seen = []
+            for speaker, said in reversed(recent):
+                if any(speaker == item[0] for item in seen):
+                    continue
+                seen.append((speaker, said))
+                if len(seen) >= 4:
+                    break
+            if seen:
+                prompt += " 最近发言：" + "；".join(f"{name}说「{said}」" for name, said in seen) + "。"
         if roster:
             prompt += (
                 " 群里已经认出来的真人："
@@ -1103,6 +1129,8 @@ class JinhuaPlugin(MaiBotPlugin):
                 lines = plan["lines"]
             if not lines:
                 lines = ["嗯 那你说"]
+            if not getattr(turn, "explicit", False):
+                lines = lines[:1]   # 主动插话只发一句，避免一次刷两条
             try:
                 probability = float(os.environ.get("JINHUA_EMOJI_P", "0.45"))
             except Exception:

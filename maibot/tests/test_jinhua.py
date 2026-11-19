@@ -444,3 +444,44 @@ class ClicheGuardTests(unittest.TestCase):
         plugin = self._plugin()
         kept = JinhuaPlugin.tame_lines(plugin, "s", ["别研究了我上号"], gaming=False)
         self.assertEqual(kept, ["嗯 那你说"])
+
+
+class SpeakThrottleTests(unittest.TestCase):
+    """主动发言节流：被点名不受限，其余受配额/间隔/深夜约束。"""
+
+    def setUp(self):
+        import os
+        self.env = os.environ.copy()
+        os.environ["JINHUA_QUIET_FROM"] = "99"   # 测试时不进入夜间静默
+        os.environ["JINHUA_QUIET_TO"] = "99"
+        os.environ["JINHUA_SPEAK_PER_HOUR"] = "2"
+        os.environ["JINHUA_SPEAK_GAP"] = "60"
+
+    def tearDown(self):
+        import os
+        os.environ.clear()
+        os.environ.update(self.env)
+
+    def test_explicit_is_never_throttled(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = SimpleNamespace(_speak_times={})
+        plugin._speak_times["s"] = [time.time()] * 5
+        allowed, _ = JinhuaPlugin.speak_allowed(plugin, "s", True)
+        self.assertTrue(allowed)
+
+    def test_quota_blocks_after_limit(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = SimpleNamespace(_speak_times={"s": [time.time() - 300, time.time() - 200]})
+        allowed, reason = JinhuaPlugin.speak_allowed(plugin, "s", False)
+        self.assertFalse(allowed)
+        self.assertIn("配额", reason)
+
+    def test_gap_blocks_quick_repeat(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = SimpleNamespace(_speak_times={"s": [time.time() - 10]})
+        allowed, reason = JinhuaPlugin.speak_allowed(plugin, "s", False)
+        self.assertFalse(allowed)
+        self.assertIn("秒", reason)

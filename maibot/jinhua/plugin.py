@@ -103,6 +103,7 @@ class JinhuaPlugin(MaiBotPlugin):
         self._fallback_at: dict[str, float] = {}
         self._send_locks: dict[str, asyncio.Lock] = {}
         self._rounds: dict[str, int] = {}
+        self._speak_times: dict[str, list[float]] = {}
         self._emoji_round: dict[str, int] = {}
         images = self.ctx.paths.data_dir / "images"
         try:
@@ -205,6 +206,42 @@ class JinhuaPlugin(MaiBotPlugin):
             data[key] = int(data.get(key, 0)) + 1
             data["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def speak_allowed(self, session: str, explicit: bool) -> tuple[bool, str]:
+        """主动发言节流：被点名不受限；否则受每小时配额、最小间隔、深夜静默约束。"""
+        if explicit:
+            return True, ""
+        now = time.time()
+        try:
+            hour = int(time.strftime("%H"))
+        except Exception:
+            hour = 12
+        quiet_from = int(os.environ.get("JINHUA_QUIET_FROM", "0"))
+        quiet_to = int(os.environ.get("JINHUA_QUIET_TO", "7"))
+        if quiet_from <= hour < quiet_to:
+            return False, "深夜静默"
+        try:
+            quota = int(os.environ.get("JINHUA_SPEAK_PER_HOUR", "5"))
+            gap = float(os.environ.get("JINHUA_SPEAK_GAP", "120"))
+        except Exception:
+            quota, gap = 5, 120.0
+        recent = [t for t in getattr(self, "_speak_times", {}).get(session, []) if now - t < 3600]
+        if len(recent) >= quota:
+            return False, "本小时配额已满"
+        if recent and now - recent[-1] < gap:
+            return False, "距上次发言不足 %.0f 秒" % gap
+        return True, ""
+
+    def note_speak(self, session: str) -> None:
+        try:
+            store = getattr(self, "_speak_times", None)
+            if store is None:
+                store = self._speak_times = {}
+            recent = [t for t in store.get(session, []) if time.time() - t < 3600]
+            recent.append(time.time())
+            store[session] = recent
         except Exception:
             pass
 
@@ -660,6 +697,21 @@ class JinhuaPlugin(MaiBotPlugin):
         ordinary = turn.group and not turn.explicit
         quiet = ordinary and not self.adaptive(turn.group)
         allowed = {"no_action", "stop", "wait"}
+        try:
+            permitted, reason = self.speak_allowed(session, bool(turn.explicit))
+        except Exception:
+            permitted, reason = True, ""
+        if not permitted:
+            # 超配额时直接把回复类工具撤掉，模型只能沉默（不能 abort，否则上游重排）
+            try:
+                self.ctx.logger.info("金桦静音：%s（%s）", reason, session[:12])
+            except Exception:
+                pass
+            kwargs["tool_definitions"] = [
+                tool for tool in kwargs["tool_definitions"]
+                if tool.get("function", {}).get("name") in {"no_action", "stop", "wait"}
+            ]
+            return {"action": "continue", "modified_kwargs": kwargs}
         if turn.explicit:
             # 被 @ 或叫到名字时必须回一句，不许选沉默
             allowed.discard("no_action")
@@ -851,8 +903,8 @@ class JinhuaPlugin(MaiBotPlugin):
                 "【输出格式】严格按行输出，不要 JSON、不要代码块、不要解释：\n"
                 "EMOJI: 标签名（不配就写 -）\n"
                 "TEXT: 第一句\n"
-                "TEXT: 第二句（可选，最多三条）\n"
-                "每行一句话、不超过 40 字，不要写别的字段。\n"
+                "TEXT: 第二句（可选，只在确实有第二个意思时才写，最多两条）\n"
+                "默认只写一条 TEXT，一条能说完就别拆；每行不超过 40 字，不要写别的字段。\n"
                 "【表情用法】" + (special + "；" if special and names else "")
                 + "其余标签按情绪挑，别连着两条用同一个。\n"
                 "不要每条都配表情：先看最近几条聊天，遇到嘲讽、被夸、有人发了离谱内容这类合适场景才配，"
@@ -1141,6 +1193,11 @@ class JinhuaPlugin(MaiBotPlugin):
             turn.media += int(any(seg.get("type") in {"image", "emoji"} for seg in message.get("raw_message", [])))
             turn.handled = True
             self._last_outbound[message["session_id"]] = time.time()
+            if not getattr(turn, "explicit", False):
+                try:
+                    self.note_speak(message["session_id"])
+                except Exception:
+                    pass
             # 首句已送出，接着把计划里剩下的句子补发出去
             pending = getattr(self, "_pending_lines", {}).pop(turn.anchor, None)
             if pending:

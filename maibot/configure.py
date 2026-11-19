@@ -110,7 +110,8 @@ def configure(root: Path, instance: Path, node: Path, node_proxy: bool, *, legac
 
     servers = list(bot.get("mcp", {}).get("servers", []))
     env = {"JINHUA_TOOL_CWD": str(root), "SEARCH_ENABLED": os.getenv("SEARCH_ENABLED", "0")}
-    for name in ("JINHUA_MCP_CONFIG", "LOL_API_KEY", "LOL_API_BASE_URL", "OPGG_MCP_URL", "SEARCH_URL"):
+    for name in ("JINHUA_MCP_CONFIG", "LOL_API_KEY", "LOL_API_BASE_URL", "OPGG_MCP_URL", "SEARCH_URL",
+                 "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "SEARCH_PROVIDER", "SEARCH_DS_TIMEOUT_MS"):
         if os.getenv(name):
             env[name] = os.environ[name]
     if node_proxy:

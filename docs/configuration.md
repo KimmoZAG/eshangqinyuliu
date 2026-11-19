@@ -41,6 +41,9 @@
 | `JINHUA_TOOL_BUDGET_MS` | `20000` | 工具总预算，必须大于检索耗时 |
 | `EMOJI_MODE` | `safe` | `safe` / `strip` / `all`，见 [emoji.md](emoji.md) |
 | `JINHUA_EMOJI_P` | `0.45` | 带图概率闸门 |
+| `JINHUA_SPEAK_PER_HOUR` | `5` | 每小时主动发言上限（被点名不计） |
+| `JINHUA_SPEAK_GAP` | `120` | 两次主动发言最小间隔（秒） |
+| `JINHUA_QUIET_FROM` / `JINHUA_QUIET_TO` | `0` / `7` | 静默时段，只回 @ 和点名 |
 | `JINHUA_HISTORY_LIMIT` | `50` | 送进 planner 的历史消息条数上限 |
 | `JINHUA_TOOL_BUDGET_MS` | `8000` | 工具调用预算，超出不再给查询工具 |
 | `JINHUA_MERGE_WINDOW_MS` | `2000` | 多条 @ 合并窗口 |

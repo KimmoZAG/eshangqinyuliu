@@ -180,7 +180,7 @@ export async function runLookup(args, { signal, search = false, mode = 'auto', i
     ids.add(q.id);
   }
 
-  const budget = { fast: 4600, auto: 11000, deep: 20500 }[mode] ?? 11000;
+  const budget = { fast: 8000, auto: 25000, deep: 40000 }[mode] ?? 25000;
   const remaining = Number.isSafeInteger(args.deadline_ms) ? args.deadline_ms - Date.now() : budget;
   const timeout = remaining <= 0 ? AbortSignal.abort() : AbortSignal.timeout(Math.min(budget, remaining));
   signal = signal ? AbortSignal.any([signal, timeout]) : timeout;

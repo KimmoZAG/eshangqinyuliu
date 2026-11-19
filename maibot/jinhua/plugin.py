@@ -290,7 +290,7 @@ class JinhuaPlugin(MaiBotPlugin):
             return False
         return True
 
-    def arm_watchdog(self, session: str, turn: Turn, message: dict, delay: float = 20.0) -> None:
+    def arm_watchdog(self, session: str, turn: Turn, message: dict, delay: float = 45.0) -> None:
         """回合兜底：到点还没发出任何消息，就补一句，绝不让对方干等。"""
 
         async def wait() -> None:
@@ -304,7 +304,7 @@ class JinhuaPlugin(MaiBotPlugin):
                 self.ctx.logger.warning("金桦兜底发言 session=%s anchor=%s", session[:12], turn.anchor[:14])
             except Exception:
                 pass
-            for text in ("我这卡了一下 你再说一遍？",):
+            for text in ("等下 我看看",):
                 try:
                     await self.ctx.send.text(text, session, reply_message=message)
                     return
@@ -760,7 +760,7 @@ class JinhuaPlugin(MaiBotPlugin):
             if lines:
                 block += "\n\n[相关旧记忆]\n" + "\n".join("- " + line for line in lines)
             items = kwargs["items"]
-            tail = {"item_type": "UserMessageItem", "parts": [{"type": "text", "text": block}]}
+            tail = {"item_type": "UserMessageItem", "meta": {}, "parts": [{"type": "text", "text": block}]}
             items.insert(max(0, len(items) - 1), tail)
         return {"action": "continue", "modified_kwargs": kwargs}
 
@@ -777,6 +777,9 @@ class JinhuaPlugin(MaiBotPlugin):
         checking = "jinhua_lookup" in allowed and any(
             item.get("tool_call", {}).get("func_name") == "jinhua_lookup" for item in items
         )
+        if checking:
+            # 已经在查了，属于“正在处理”，兜底会让用户收到“我卡了一下”
+            turn.fallback_sent = True
         accepted = []
         for item in items:
             if item.get("item_type") == "FunctionCallItem":

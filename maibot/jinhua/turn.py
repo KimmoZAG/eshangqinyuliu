@@ -8,7 +8,7 @@ from typing import Any
 
 MODE = re.compile(r"^/(快答|自动|深想)(?:[\s：:]|$)\s*")
 MODES = {"快答": "fast", "自动": "auto", "深想": "deep"}
-BUDGET_MS = {"fast": 7000, "auto": 15000, "deep": 25000}
+BUDGET_MS = {"fast": 10000, "auto": 30000, "deep": 45000}
 QUESTIONS = re.compile(
     r"查(?:下|一下)|搜(?:下|一下)|(?:下场|下一场).{0,14}(?:谁|什么时候|几点)|赛程|赛果|比分|几比几|谁赢|录像|"
     r"世界第一|世界排名|排行榜|在线(?:人数|多少|排行)|多少人.{0,5}在玩|"

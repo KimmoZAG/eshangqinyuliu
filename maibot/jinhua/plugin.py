@@ -341,7 +341,7 @@ class JinhuaPlugin(MaiBotPlugin):
                 self.ctx.logger.warning("金桦兜底发言 session=%s anchor=%s", session[:12], turn.anchor[:14])
             except Exception:
                 pass
-            for text in ("等下 我看看",):
+            for text in ("我查一下 稍等",):
                 try:
                     await self.ctx.send.text(text, session, reply_message=message)
                     return
@@ -699,6 +699,8 @@ class JinhuaPlugin(MaiBotPlugin):
         allowed = {"no_action", "stop", "wait"}
         try:
             permitted, reason = self.speak_allowed(session, bool(turn.explicit))
+            if permitted and not getattr(turn, "explicit", False):
+                self.note_speak(session)   # 预占名额，避免并发回合同时通过
         except Exception:
             permitted, reason = True, ""
         if not permitted:
@@ -1177,14 +1179,6 @@ class JinhuaPlugin(MaiBotPlugin):
             )
         except Exception:
             pass
-        if not getattr(turn, "speak_counted", False):
-            turn.speak_counted = True
-            if not getattr(turn, "explicit", False):
-                try:
-                    self.note_speak(message["session_id"])
-                    self.ctx.logger.info("金桦记一次发言 session=%s", str(message["session_id"])[:12])
-                except Exception:
-                    pass
         kwargs["typing"] = False
         return {"action": "continue", "modified_kwargs": kwargs}
 

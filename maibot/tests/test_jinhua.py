@@ -485,3 +485,25 @@ class SpeakThrottleTests(unittest.TestCase):
         allowed, reason = JinhuaPlugin.speak_allowed(plugin, "s", False)
         self.assertFalse(allowed)
         self.assertIn("秒", reason)
+
+
+class SpeakClaimTests(unittest.TestCase):
+    """判定即预占：并发回合不能同时通过。"""
+
+    def setUp(self):
+        import os
+        os.environ["JINHUA_QUIET_FROM"] = "99"
+        os.environ["JINHUA_QUIET_TO"] = "99"
+        os.environ["JINHUA_SPEAK_PER_HOUR"] = "3"
+        os.environ["JINHUA_SPEAK_GAP"] = "120"
+
+    def test_claim_then_block(self):
+        from jinhua.plugin import JinhuaPlugin
+
+        plugin = SimpleNamespace(_speak_times={})
+        first, _ = JinhuaPlugin.speak_allowed(plugin, "s", False)
+        self.assertTrue(first)
+        JinhuaPlugin.note_speak(plugin, "s")          # 模拟预占
+        second, reason = JinhuaPlugin.speak_allowed(plugin, "s", False)
+        self.assertFalse(second)
+        self.assertIn("秒", reason)

@@ -1177,6 +1177,14 @@ class JinhuaPlugin(MaiBotPlugin):
             )
         except Exception:
             pass
+        if not getattr(turn, "speak_counted", False):
+            turn.speak_counted = True
+            if not getattr(turn, "explicit", False):
+                try:
+                    self.note_speak(message["session_id"])
+                    self.ctx.logger.info("金桦记一次发言 session=%s", str(message["session_id"])[:12])
+                except Exception:
+                    pass
         kwargs["typing"] = False
         return {"action": "continue", "modified_kwargs": kwargs}
 
@@ -1193,11 +1201,6 @@ class JinhuaPlugin(MaiBotPlugin):
             turn.media += int(any(seg.get("type") in {"image", "emoji"} for seg in message.get("raw_message", [])))
             turn.handled = True
             self._last_outbound[message["session_id"]] = time.time()
-            if not getattr(turn, "explicit", False):
-                try:
-                    self.note_speak(message["session_id"])
-                except Exception:
-                    pass
             # 首句已送出，接着把计划里剩下的句子补发出去
             pending = getattr(self, "_pending_lines", {}).pop(turn.anchor, None)
             if pending:
